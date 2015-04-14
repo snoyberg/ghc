@@ -80,9 +80,15 @@ There are many wrinkles:
 
 * To be able to define them by hand, they need to have user-writable
   names, thus
-        tcBool, not $tcBool
-  and   tcList, not $tc[]
-  Hence PrelNames.tyConRepModOcc, and mkSpecialTyConRepName.
+        tcBool    not $tcBool    for the type-rep TyCon for Bool
+  Hence PrelNames.tyConRepModOcc
+
+* Moreover for type constructors with special syntax, they need to have
+  completely hand-crafted names
+    lists    tcList         not $tc[]   for the type-rep TyCon for []
+    kinds    tcLiftedKind   not $tc*    for the type-rep TyCon for *
+  Hence PrelNames.mkSpecialTyConRepName, which takes an extra FastString
+  to use for the TyConRepName
 
 * Since listTyCon, boolTyCon etd are wired in, their TyConRepNames must
   be wired in as well.  For these wired-in TyCons we generate the
@@ -154,8 +160,8 @@ type TypeableStuff
     , LHsExpr Id  -- Of type GHC.Types.Module
     , String      -- Package name
     , String      -- Module name
-    , DataCon
-    , DataCon )
+    , DataCon     -- Data constructor GHC.Types.TyCon
+    , DataCon )   -- Data constructor GHC.Types.TrNameS
 
 mk_typeable_binds :: TypeableStuff -> TyCon -> LHsBinds Id
 mk_typeable_binds stuff tycon

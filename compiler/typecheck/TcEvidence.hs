@@ -734,6 +734,7 @@ data EvTerm
 
 
 -- | Instructions on how to make a 'Typeable' dictionary.
+-- See Note [Typeable evidence terms]
 data EvTypeable
   = EvTypeableTyCon [EvTerm]
     -- ^ Dicitionary for Typeable (T k1..kn t1..tn)
@@ -767,7 +768,19 @@ data EvCallStack
     -- @?name@, occurring at @loc@, in a calling context @stk@.
   deriving( Data.Data, Data.Typeable )
 
-{-
+{- Note [Typeable evidence terms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The EvTypeable data type looks isomorphic to Type, but the EvTerms
+inside can be EvIds.  Eg
+   f :: forall a. Typeable a => a -> TypeRep
+   f x = typeRep (undefined :: Proxy [a])
+Here for the (Typeable [a]) dictionary passed to typeRep we make
+evidence
+  dl :: Typeable [a] = EvTypeable [a] (EvTypeableTyCon [EvId d]
+where
+  d :: Typable a
+is the lambda-bound dictionary passed into f.
+
 Note [Coercion evidence terms]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 A "coercion evidence term" takes one of these forms

@@ -44,7 +44,7 @@ import qualified Data.Map as Map
 import Data.Maybe ( isJust )
 
 {-------------------------------------------------------------------------------
-Built-in type constructors for functions on type-lelve nats
+Built-in type constructors for functions on type-level nats
 -}
 
 typeNatTyCons :: [TyCon]

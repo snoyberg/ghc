@@ -915,7 +915,6 @@ dsEvTypeable ty ev
 
 ds_ev_typeable :: Type -> EvTypeable -> DsM CoreExpr
 -- Returns a CoreExpr :: TypeRep (for ty)
--- together with ty
 ds_ev_typeable ty (EvTypeableTyCon ev_ts)
   | Just (tc, kts) <- splitTyConApp_maybe ty
   , (ks, ts) <- splitTyConArgs tc kts

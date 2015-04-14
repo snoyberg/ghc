@@ -577,12 +577,9 @@ splitTyConArgs :: TyCon -> [KindOrType] -> ([Kind], [Type])
 -- Given a tycon app (T k1 .. kn t1 .. tm), split the kind and type args
 -- TyCons always have prenex kinds
 splitTyConArgs tc kts
-  = go (tyConKind tc) [] kts
+  = splitAtList kind_vars kts
   where
-    go tc_kind acc (kt:kts)
-       | Just (_,body_kind) <- splitForAllTy_maybe tc_kind
-       = go body_kind (kt:acc) kts
-    go _ acc ts = (reverse acc, ts)
+    (kind_vars, _) = splitForAllTys (tyConKind tc)
 
 newTyConInstRhs :: TyCon -> [Type] -> Type
 -- ^ Unwrap one 'layer' of newtype on a type constructor and its

@@ -14,10 +14,10 @@ import TcCanonical
 import TcFlatten
 import VarSet
 import Type
-import Kind (isKind)
+import Kind   ( isKind, isConstraintKind )
 import Unify
 import InstEnv( DFunInstType, lookupInstEnv, instanceDFunId )
-import CoAxiom(sfInteractTop, sfInteractInert)
+import CoAxiom( sfInteractTop, sfInteractInert )
 
 import Var
 import TcType
@@ -1876,7 +1876,8 @@ matchTypeableClass :: Class    -- The Typeable class
                    -> [Type]
                    -> CtLoc -> TcS LookupInstResult
 matchTypeableClass clas [k, t] loc
-  | isForAllTy k                            = return NoInstance
+  | isForAllTy t                            = return NoInstance
+  | isConstraintKind k                      = return NoInstance
   | Just (tc, kts) <- splitTyConApp_maybe t = doTyConApp tc kts
   | Just (f,kt )   <- splitAppTy_maybe t    = doTyApp f kt
   | Just _         <- isNumLitTy t          = doLit

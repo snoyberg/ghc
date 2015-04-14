@@ -319,12 +319,15 @@ superKindTyConName, anyKindTyConName, liftedTypeKindTyConName,
       constraintKindTyConName
    :: Name
 
-mk_kind_tycon :: Name -> FastString -> TyCon
+mk_kind_tycon :: Name         -- Name of the kind constructor,      e.g. *
+              -> FastString   -- Name of the TyConRepName function  e.g. tcLiftedKind :: TyCon
+              -> TyCon        -- The kind constructor
 mk_kind_tycon tc_name rep_fs
   = mkKindTyCon tc_name superKind (mkSpecialTyConRepName rep_fs tc_name)
+    -- mkSpecialTyConRepName: see Note [Grand plan for Typeable] in TcTypeable
 
 superKindTyCon = mk_kind_tycon superKindTyConName (fsLit "tcBOX")
-   -- See Note [SuperKind (BOX)]
+    -- See Note [SuperKind (BOX)]
 
 anyKindTyCon          = mk_kind_tycon anyKindTyConName          (fsLit "tcAnyK")
 constraintKindTyCon   = mk_kind_tycon constraintKindTyConName   (fsLit "tcConstraint")

@@ -417,9 +417,9 @@ tupleCon UnboxedTuple i = snd (unboxedTupleArr ! i)
 tupleCon ConstraintTuple    i = snd (factTupleArr    ! i)
 
 boxedTupleArr, unboxedTupleArr, factTupleArr :: Array Int (TyCon,DataCon)
-boxedTupleArr   = listArray (0,mAX_TUPLE_SIZE) [mk_tuple BoxedTuple i | i <- [0..mAX_TUPLE_SIZE]]
-unboxedTupleArr = listArray (0,mAX_TUPLE_SIZE) [mk_tuple UnboxedTuple i | i <- [0..mAX_TUPLE_SIZE]]
-factTupleArr = listArray (0,mAX_TUPLE_SIZE) [mk_tuple ConstraintTuple i | i <- [0..mAX_TUPLE_SIZE]]
+boxedTupleArr   = listArray (0,mAX_TUPLE_SIZE) [mk_tuple BoxedTuple i      | i <- [0..mAX_TUPLE_SIZE]]
+unboxedTupleArr = listArray (0,mAX_TUPLE_SIZE) [mk_tuple UnboxedTuple i    | i <- [0..mAX_TUPLE_SIZE]]
+factTupleArr    = listArray (0,mAX_TUPLE_SIZE) [mk_tuple ConstraintTuple i | i <- [0..mAX_TUPLE_SIZE]]
 
 mk_tuple :: TupleSort -> Int -> (TyCon,DataCon)
 mk_tuple sort arity = (tycon, tuple_con)
@@ -429,7 +429,7 @@ mk_tuple sort arity = (tycon, tuple_con)
         rep_nm  = case sort of
           BoxedTuple      -> Just (mkPrelTyConRepName tc_name)
           UnboxedTuple    -> Nothing
-          ConstraintTuple -> Just (mkPrelTyConRepName tc_name)  -- I think
+          ConstraintTuple -> Nothing   -- Constraints are not typeble
 
         prom_tc = case sort of
           BoxedTuple      -> Promoted (mkPromotedTyCon tycon (promoteKind tc_kind))
