@@ -1000,7 +1000,7 @@ Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.
 dsPmWarn :: DynFlags -> DsMatchContext -> [Type] -> [EquationInfo] -> DsM ()
 dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
   = when (flag_i || flag_u) $ do
-      pm_result <- checkpm tys qs
+      pm_result <- check tys qs -- checkpm tys qs
       case pm_result of
         Nothing -> putSrcSpanDs loc (warnDs (gave_up_warn kind))
         Just (redundant, inaccessible, uncovered) ->
@@ -1019,7 +1019,8 @@ dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
 
     pprEqnsU qs = pp_context ctx (ptext (sLit "are non-exhaustive")) $ \_ ->
       hang (ptext (sLit "Patterns not matched:")) 4
-           (vcat (map pprUncovered (take maximum_output qs)) $$ dots qs)
+           (pprUncovered qs)
+           -- (vcat (map pprUncovered (take maximum_output qs)) $$ dots qs)
 
     gave_up_warn hs_ctx = vcat [ ptext (sLit "The exhaustiveness/redundancy checker gave up")
                                , ptext (sLit "In") <+> pprMatchContext hs_ctx

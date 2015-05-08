@@ -205,6 +205,7 @@ After CoreTidy, top-level LocalIds are turned into GlobalIds
 -}
 
 instance Outputable Var where
+  -- ppr var = parens (ppr (varName var) <+> dcolon <+> ppr (varType var)) <> getPprStyle (ppr_debug var)
   ppr var = ppr (varName var) <> getPprStyle (ppr_debug var)
 
 ppr_debug :: Var -> PprStyle -> SDoc

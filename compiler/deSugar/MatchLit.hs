@@ -12,7 +12,6 @@ module MatchLit ( dsLit, dsOverLit, hsLitKey, hsOverLitKey
                 , tidyLitPat, tidyNPat
                 , matchLiterals, matchNPlusKPats, matchNPats
                 , warnAboutIdentities, warnAboutEmptyEnumerations
-                , pmTidyLitPat, pmTidyNPat
                 ) where
 
 #include "HsVersions.h"
@@ -470,62 +469,3 @@ matchNPlusKPats (var:vars) ty (eqn1:eqns)
     shift _ e = pprPanic "matchNPlusKPats/shift" (ppr e)
 
 matchNPlusKPats vars _ eqns = pprPanic "matchNPlusKPats" (ppr (vars, eqns))
-
-{-
-%************************************************************************
-%*                                                                      *
-           Tidy literal patterns for pattern match check
-%*                                                                      *
-%************************************************************************
-
-Note [Tidying literals for pattern matching]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Functions @pmTidyLitPat@ and @pmTidyNPat@ tidy literal patterns for pattern
-match check. They have 2 differences from their couterparts @tidyLitPat@ and
-@tidyNPat@:
-
-\begin{itemize}
-  \item For better pretty printing, we do not wrap literals in constructors (as
-        they are actually implemented).
-  \item Overloaded literals, for which we know the type, are translated to simple
-        literals of the same type. This gives us better behaviour for the check.
-        See Note [Pattern match check give up] in Check.lhs
-\end{itemize}
-
-Hence, apart from translating overloaded literals to simple literals when we know
-their exact type, the only thing we do is to translate string patterns to list of
-characters (also not wrapped in Char# constructors).
--}
-
-pmTidyLitPat :: HsLit -> Pat Id
-pmTidyLitPat (HsString src s) = unLoc $ foldr char_cons char_nil (unpackFS s)
-  where char_cons c pat       = mkPrefixConPat consDataCon [noLoc (LitPat (HsChar src c)), pat] [charTy] -- Changed from HsCharPrim
-        char_nil              = mkPrefixConPat nilDataCon  [] [charTy]
-pmTidyLitPat literal          = LitPat literal -- Dont do anything with it
-
-pmTidyNPat :: HsOverLit Id -> Maybe (SyntaxExpr Id) -> SyntaxExpr Id -> Pat Id
-pmTidyNPat (OverLit val False _ ty) mb_neg _
-  | isIntTy ty,    Just (src,int_lit)  <- mb_int_lit = LitPat (HsInt      src int_lit) -- changed from HsIntPrim
-  | isWordTy ty,   Just (src,int_lit)  <- mb_int_lit = LitPat (HsWordPrim src int_lit)
-  | isFloatTy ty,  Just rat_lit        <- mb_rat_lit = LitPat (HsFloatPrim  rat_lit)
-  | isDoubleTy ty, Just rat_lit        <- mb_rat_lit = LitPat (HsDoublePrim rat_lit)
-  | isStringTy ty, Just (src, str_lit) <- mb_str_lit = pmTidyLitPat (HsString src str_lit)
-  where
-    mb_int_lit :: Maybe (String,Integer)
-    mb_int_lit = case (mb_neg, val) of
-                   (Nothing, HsIntegral src i) -> Just (src,i)
-                   (Just _,  HsIntegral src i) -> Just (src,-i)
-                   _ -> Nothing
-    mb_rat_lit :: Maybe FractionalLit
-    mb_rat_lit = case (mb_neg, val) of
-                   (Nothing, HsIntegral _ i) -> Just (integralFractionalLit (fromInteger i))
-                   (Just _,  HsIntegral _ i) -> Just (integralFractionalLit (fromInteger (-i)))
-                   (Nothing, HsFractional f) -> Just f
-                   (Just _,  HsFractional f) -> Just (negateFractionalLit f)
-                   _ -> Nothing
-    mb_str_lit :: Maybe (String, FastString)
-    mb_str_lit = case (mb_neg, val) of
-                   (Nothing, HsIsString src s) -> Just (src, s)
-                   _ -> Nothing
-pmTidyNPat over_lit mb_neg eq = NPat over_lit mb_neg eq
