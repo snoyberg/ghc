@@ -215,7 +215,12 @@ translatePat usupply pat = case pat of
         g  = GBindAbs pats $ PmExprOther $ HsApp (noLoc to_list) xe -- [...] <- toList x
     in  [xp,g]
 
-  ConPatOut { pat_con = L _ (PatSynCon _) } -> -- CHECKME: Is there a way to unfold this into a normal pattern?
+  ConPatOut { pat_con = L _ (PatSynCon _) } ->
+    -- Pattern synonyms have a "matcher" (see Note [Pattern synonym representation] in PatSyn.hs
+    -- We should be able to transform (P x y)
+    -- to   v (Just (x, y) <- matchP v (\x y -> Just (x,y)) Nothing
+    -- That is, a combination of a variable pattern and a guard
+    -- But there are complications with GADTs etc, and this isn't done yet
     [mkPmVar usupply (hsPatType pat)]
 
   ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps } ->
