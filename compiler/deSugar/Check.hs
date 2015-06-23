@@ -254,7 +254,7 @@ mkPmConPat con arg_tys ex_tvs dicts args
 
 translatePat :: Pat Id -> UniqSM PatVec
 translatePat pat = case pat of
-  WildPat ty         -> getUniqueSupplyM >>= \us -> return [mkPmVar us ty]
+  WildPat ty         -> (:[]) <$> mkPmVarSM ty
   VarPat  id         -> return [VarAbs id]
   ParPat p           -> translatePat (unLoc p)
   LazyPat p          -> translatePat (unLoc p) -- COMEHERE: We ignore laziness   for now
@@ -267,8 +267,13 @@ translatePat pat = case pat of
         g   = GBindAbs ps (PmExprVar (unLoc lid))
     return [idp, g]
 
-  SigPatOut p ty     -> translatePat (unLoc p) -- TODO: Use the signature?
-  CoPat wrapper p ty -> translatePat p         -- TODO: Check if we need the coercion
+  SigPatOut p ty -> translatePat (unLoc p) -- TODO: Use the signature?
+
+  CoPat wrapper p ty -> do
+    ps      <- translatePat p
+    (xp,xe) <- mkPmId2FormsSM ty {- IS THIS TYPE CORRECT OR IS IT THE OPPOSITE?? -}
+    let g = GBindAbs ps $ PmExprOther $ HsWrap wrapper (unLoc xe)
+    return [xp,g]
 
   -- (n + k)  ===>   x (True <- x >= k) (n <- x-k)
   NPlusKPat n k ge minus -> do
