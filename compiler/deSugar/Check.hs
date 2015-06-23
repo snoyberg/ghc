@@ -90,11 +90,11 @@ data PmConstraint = TmConstraint Id PmExpr -- Term equalities: x ~ e
 
 data Abstraction = P | V   -- Used to parameterise PmPat
 
-type ValAbs = PmPat 'V -- Value Abstraction
-type Pat    = PmPat 'P -- Pattern
+type ValAbs  = PmPat 'V -- Value Abstraction
+type Pattern = PmPat 'P -- Pattern
 
-type PatVec   = [Pat]    -- Just a type synonym for pattern vectors ps
-type ValueVec = [ValAbs] -- Just a type synonym for velue   vectors as
+type PatVec   = [Pattern] -- Just a type synonym for pattern vectors ps
+type ValueVec = [ValAbs]  -- Just a type synonym for velue   vectors as
 
 -- The differnence between patterns (PmPat 'P)
 -- and value abstractios (PmPat 'V)
@@ -102,12 +102,24 @@ type ValueVec = [ValAbs] -- Just a type synonym for velue   vectors as
 -- and value abstractions cannot.  Enforced with a GADT.
 
 data PmPat :: Abstraction -> * where
-  GBindAbs :: [PmPat 'P] -> PmExpr -> PmPat 'P    -- Guard: P <- e (strict by default) Instead of a single P use a list [AsPat]
+  -- Guard: P <- e (strict by default) Instead of a single P use a list [AsPat]
+  GBindAbs { gabs_pats :: [PmPat 'P]
+           , gabs_expr :: PmExpr } :: PmPat 'P
 
-  ConAbs   :: DataCon -> [PmPat abs] -> PmPat abs -- Constructor: K ps
-                                                  -- The patterns ps are the ones visible in the source language
+  -- Constructor: K ps
+  -- The patterns ps are the ones visible in the source language
+  ConAbs   { cabs_con     :: DataCon
+           , cabs_arg_tys :: [Type]          -- The univeral arg types, 1-1 with the universal
+                                             -- tyvars of the constructor/pattern synonym
+                                             --   Use (conLikeResTy pat_con pat_arg_tys) to get
+                                             --   the type of the pattern
 
-  VarAbs   :: Id -> PmPat abs                     -- Variable: x
+           , cabs_tvs     :: [TyVar]         -- Existentially bound type variables (tyvars only)
+           , cabs_dicts   :: [EvVar]         -- Ditto *coercion variables* and *dictionaries*
+           , cabs_args    :: [PmPat abs] } :: PmPat abs
+
+  -- Variable: x
+  VarAbs  { vabs_id :: Id } :: PmPat abs
 
 -- data T a where
 --     MkT :: forall p q. (Eq p, Ord q) => p -> q -> T [p]
@@ -122,20 +134,6 @@ data PmPat :: Abstraction -> * where
    arg_ts ::= ty1 .. tyn
 -}
 
-
-  ConAbs {
-        pat_con     :: DataCon
-        pat_arg_tys :: [Type],          -- The univeral arg types, 1-1 with the universal
-                                        -- tyvars of the constructor/pattern synonym
-                                        --   Use (conLikeResTy pat_con pat_arg_tys) to get
-                                        --   the type of the pattern
-
-        pat_tvs   :: [TyVar],           -- Existentially bound type variables (tyvars only)
-        pat_dicts :: [EvVar],           -- Ditto *coercion variables* and *dictionaries*
-                                        -- One reason for putting coercion variable here, I think,
-                                        --      is to ensure their kinds are zonked
-        pat_args :: [PmPat abs]
-    }
 
 data ValSetAbs   -- Reprsents a set of value vector abstractions
                  -- Notionally each value vector abstraction is a triple (Gamma |- us |> Delta)
@@ -154,6 +152,11 @@ type PmResult = ([EquationInfo], [EquationInfo], [([ValAbs],[PmConstraint])])
 -- our term solver cannot handle all of them, so we lift it to PmExpr instead.
 data PmExpr = PmExprVar   Id
             | PmExprCon   DataCon [PmExpr]
+              -- | We should probably add the following as well
+              --     , cabs_arg_tys :: [Type]          -- The univeral arg types, 1-1 with the universal
+              --                                       -- tyvars of the constructor/pattern synonym
+              --     , cabs_tvs     :: [TyVar]         -- Existentially bound type variables (tyvars only)
+              --     , cabs_dicts   :: [EvVar]         -- Ditto *coercion variables* and *dictionaries*
             | PmExprLit   HsLit
             | PmExprOLit  (HsOverLit Id)
             | PmExprNeg   (HsOverLit Id) -- Syntactic negation
@@ -210,6 +213,28 @@ initial_uncovered usupply tys = foldr Cons Singleton val_abs_vec
 %************************************************************************
 -}
 
+truePmPat :: PmPat abs
+truePmPat = mkPmConPat trueDataCon []
+
+falsePmPat :: PmPat abs
+falsePmPat = mkPmConPat falseDataCon []
+
+-- NEEDS FIX
+nilPmPat :: PmPat abs
+nilPmPat = mkPmConPat nilDataCon []
+
+-- NEEDS FIX
+mkListPmPat :: [PmPat abs] -> [PmPat abs] -> [PmPat abs]
+mkListPmPat xs ys = [mkPmConPat consDataCon (xs++ys)]
+
+-- NEEDS FIX: IGNORES EVERYTHING
+mkPmConPat :: DataCon -> [PmPat abs] -> PmPat abs
+mkPmConPat con args = ConAbs { cabs_con     = con
+                             , cabs_arg_tys = []
+                             , cabs_tvs     = []
+                             , cabs_dicts   = []
+                             , cabs_args    = args }
+
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
 
@@ -230,7 +255,7 @@ translatePat usupply pat = case pat of
   NPlusKPat n k ge minus ->
     let (xp, xe) = mkPmId2Forms usupply (idType (unLoc n))
         ke = noLoc (HsOverLit k)               -- k as located expression
-        g1 = GBindAbs [ConAbs trueDataCon []] $ PmExprOther $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
+        g1 = GBindAbs [truePmPat] $ PmExprOther $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
         g2 = GBindAbs [VarAbs (unLoc n)]      $ PmExprOther $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
     in  [xp, g1, g2]
 
@@ -249,8 +274,7 @@ translatePat usupply pat = case pat of
         (xp, xe) = mkPmId2Forms usupply1 (hsPatType pat)
         ps = translatePatVec usupply2 (map unLoc lpats) -- list as value abstraction
 
-        mkListPat x y = [ConAbs consDataCon (x++y)]      -- maybe make it a top-level function
-        pats = foldr mkListPat [ConAbs nilDataCon []] ps -- maybe make it a top-level function
+        pats = foldr mkListPmPat [nilPmPat] ps
 
         g  = GBindAbs pats $ PmExprOther $ HsApp (noLoc to_list) xe -- [...] <- toList x
     in  [xp,g]
@@ -264,7 +288,7 @@ translatePat usupply pat = case pat of
     [mkPmVar usupply (hsPatType pat)]
 
   ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps } ->
-    [ConAbs con (translateConPatVec usupply con ps)]
+    [mkPmConPat con (translateConPatVec usupply con ps)]
 
   NPat lit mb_neg eq ->
     let var   = mkPmId usupply (hsPatType pat)
@@ -279,19 +303,17 @@ translatePat usupply pat = case pat of
     in  [VarAbs var, guard]
 
   ListPat ps ty Nothing ->
-    let tidy_ps       = translatePatVec usupply (map unLoc ps)
-        mkListPat x y = [ConAbs consDataCon (x++y)]
-    in  foldr mkListPat [ConAbs nilDataCon []] tidy_ps
+    foldr mkListPmPat [nilPmPat] $ translatePatVec usupply (map unLoc ps)
 
   PArrPat ps tys ->
     let tidy_ps  = translatePatVec usupply (map unLoc ps)
         fake_con = parrFakeCon (length ps)
-    in  [ConAbs fake_con (concat tidy_ps)]
+    in  [mkPmConPat fake_con (concat tidy_ps)]
 
   TuplePat ps boxity tys ->
     let tidy_ps   = translatePatVec usupply (map unLoc ps)
         tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
-    in  [ConAbs tuple_con (concat tidy_ps)]
+    in  [mkPmConPat tuple_con (concat tidy_ps)]
 
   -- --------------------------------------------------------------------------
   -- Not supposed to happen
@@ -381,19 +403,20 @@ covered usupply (VarAbs x : ps) (Cons va vsa)
   where cs = [TmConstraint x (valAbsToPmExpr va)]
 
 -- CConCon
-covered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
+covered usupply (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
+          (Cons (ConAbs { cabs_con = c2, cabs_args = args2 }) vsa)
   | c1 /= c2  = Empty
   | otherwise = wrapK c1 (covered usupply (args1 ++ ps) (foldr consValSetAbs vsa args2))
 
 -- CConVar
-covered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
-  = covered usupply2 (ConAbs con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa))
+covered usupply (ConAbs { cabs_con = con, cabs_args = args } : ps) (Cons (VarAbs x) vsa)
+  = covered usupply2 (mkPmConPat con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
 
-covered _usupply (ConAbs _ _ : _) Singleton  = panic "covered: length mismatch: constructor-sing"
-covered _usupply (VarAbs _   : _) Singleton  = panic "covered: length mismatch: variable-sing"
+covered _usupply (ConAbs {} : _) Singleton  = panic "covered: length mismatch: constructor-sing"
+covered _usupply (VarAbs _  : _) Singleton  = panic "covered: length mismatch: variable-sing"
 covered _usupply []               (Cons _ _) = panic "covered: length mismatch: Cons"
 
 -- ----------------------------------------------------------------------------
@@ -428,13 +451,14 @@ uncovered usupply (VarAbs x : ps) (Cons va vsa)
   where cs = [TmConstraint x (valAbsToPmExpr va)]
 
 -- UConCon
-uncovered usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
-  | c1 /= c2  = ConAbs c2 args2 `consValSetAbs` vsa
+uncovered usupply (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
+            (Cons (ConAbs { cabs_con = c2, cabs_args = args2 }) vsa)
+  | c1 /= c2  = mkPmConPat c2 args2 `consValSetAbs` vsa
   | otherwise = wrapK c1 (uncovered usupply (args1 ++ ps) (foldr consValSetAbs vsa args2))
 
 -- UConVar
-uncovered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
-  = uncovered usupply2 (ConAbs con args : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
+uncovered usupply (ConAbs { cabs_con = con, cabs_args = args } : ps) (Cons (VarAbs x) vsa)
+  = uncovered usupply2 (mkPmConPat con args : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
   where
     -- Some more uniqSupplies
     (usupply1, usupply2) = splitUniqSupply usupply
@@ -445,8 +469,8 @@ uncovered usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
     add_one (va,cs) valset = valset `unionValSetAbs` (va `consValSetAbs` (cs `addConstraints` vsa))
     inst_vsa   = foldr add_one Empty cons_cs
 
-uncovered _usupply (ConAbs _ _ : _) Singleton  = panic "uncovered: length mismatch: constructor-sing"
-uncovered _usupply (VarAbs _   : _) Singleton  = panic "uncovered: length mismatch: variable-sing"
+uncovered _usupply (ConAbs {} : _) Singleton  = panic "uncovered: length mismatch: constructor-sing"
+uncovered _usupply (VarAbs _  : _) Singleton  = panic "uncovered: length mismatch: variable-sing"
 uncovered _usupply []               (Cons _ _) = panic "uncovered: length mismatch: Cons"
 
 -- ----------------------------------------------------------------------------
@@ -482,20 +506,21 @@ divergent usupply (VarAbs x : ps) (Cons va vsa)
   where cs = [TmConstraint x (valAbsToPmExpr va)]
 
 -- DConCon
-divergent usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
+divergent usupply (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
+            (Cons (ConAbs { cabs_con = c2, cabs_args = args2 }) vsa)
   | c1 /= c2  = Empty
   | otherwise = wrapK c1 (divergent usupply (args1 ++ ps) (foldr consValSetAbs vsa args2))
 
 -- DConVar [NEEDS WORK]
-divergent usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
+divergent usupply (ConAbs { cabs_con = con, cabs_args = args } : ps) (Cons (VarAbs x) vsa)
   = Union (Cons (VarAbs x) (Constraint [BtConstraint x] vsa))
-          (divergent usupply2 (ConAbs con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa)))
+          (divergent usupply2 (mkPmConPat con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa)))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
 
-divergent _usupply (ConAbs _ _ : _) Singleton  = panic "divergent: length mismatch: constructor-sing"
-divergent _usupply (VarAbs _   : _) Singleton  = panic "divergent: length mismatch: variable-sing"
+divergent _usupply (ConAbs {} : _) Singleton  = panic "divergent: length mismatch: constructor-sing"
+divergent _usupply (VarAbs _  : _) Singleton  = panic "divergent: length mismatch: variable-sing"
 divergent _usupply []               (Cons _ _) = panic "divergent: length mismatch: Cons"
 
 -- ----------------------------------------------------------------------------
@@ -520,7 +545,7 @@ mkOneConFull x usupply con = (con_abs, all_cs)
     all_cs   = [tm_eq_ct, ty_eq_ct, TyConstraint thetas]           -- all constraints
 
 mkConFull :: UniqSupply -> DataCon -> ValAbs
-mkConFull usupply con = ConAbs con args
+mkConFull usupply con = mkPmConPat con args
   where
     uniqs_tys = listSplitUniqSupply usupply `zip` dataConOrigArgTys con
     args      = map (uncurry mkPmVar) uniqs_tys
@@ -542,7 +567,7 @@ wrapK con = wrapK_aux (dataConSourceArity con) emptylist
   where
     wrapK_aux :: Int -> DList ValAbs -> ValSetAbs -> ValSetAbs
     wrapK_aux _ _    Empty               = Empty
-    wrapK_aux 0 args vsa                 = ConAbs con (toList args) `consValSetAbs` vsa
+    wrapK_aux 0 args vsa                 = mkPmConPat con (toList args) `consValSetAbs` vsa
     wrapK_aux _ _    Singleton           = panic "wrapK: Singleton"
     wrapK_aux n args (Cons vs vsa)       = wrapK_aux (n-1) (args `snoc` vs) vsa
     wrapK_aux n args (Constraint cs vsa) = cs `addConstraints` wrapK_aux n args vsa
@@ -585,11 +610,12 @@ isNotEmptyValSetAbs Empty = False -- Empty the only representation for an empty 
 isNotEmptyValSetAbs _     = True
 
 valAbsToPmExpr :: ValAbs -> PmExpr
-valAbsToPmExpr (VarAbs x)    = PmExprVar x
-valAbsToPmExpr (ConAbs c ps) = PmExprCon c (map valAbsToPmExpr ps)
+valAbsToPmExpr (VarAbs x)                  = PmExprVar x
+valAbsToPmExpr (ConAbs { cabs_con  = c
+                       , cabs_args = ps }) = PmExprCon c (map valAbsToPmExpr ps)
 
-eqTrueExpr :: PmExpr -> PatAbs
-eqTrueExpr expr = GBindAbs [ConAbs trueDataCon []] expr
+eqTrueExpr :: PmExpr -> Pattern
+eqTrueExpr expr = GBindAbs [truePmPat] expr
 
 no_fixity :: a -- CHECKME: Can we retrieve the fixity from the operator name?
 no_fixity = panic "Check: no fixity"
@@ -941,6 +967,16 @@ isFalsePmExpr :: PmExpr -> Bool
 isFalsePmExpr (PmExprCon c []) = c == falseDataCon
 isFalsePmExpr _other_expr      = False
 
+--   ConAbs   { cabs_con     :: DataCon
+--            -- , cabs_arg_tys :: [Type]          -- The univeral arg types, 1-1 with the universal
+--            --                                   -- tyvars of the constructor/pattern synonym
+--            --                                   --   Use (conLikeResTy pat_con pat_arg_tys) to get
+--            --                                   --   the type of the pattern
+-- 
+--            -- , cabs_tvs     :: [TyVar]         -- Existentially bound type variables (tyvars only)
+--            -- , cabs_dicts   :: [EvVar]         -- Ditto *coercion variables* and *dictionaries*
+--            , cabs_args    :: [PmPat abs] } :: PmPat abs
+
 -- ----------------------------------------------------------------------------
 -- | Substitution for PmExpr
 
@@ -1230,6 +1266,33 @@ forcedVars env = Map.filter isForced $ Map.map (getValuePmExpr env) env --termin
 {-
 %************************************************************************
 %*                                                                      *
+\subsection{Something more incremental for the term oracle maybe??}
+%*                                                                      *
+%************************************************************************
+-}
+
+-- | The env is always a FINAL MAP. NO REDIRECTION
+-- Assume in input, preserve in output
+solveVarEqI :: VarEq -> PmVarEnv -> Maybe PmVarEnv
+solveVarEqI (x,y) env =
+  case (Map.lookup x env, Map.lookup y env) of
+    (Nothing, Nothing) -> Just $ Map.insert x (PmExprVar y) env
+    (Just ex, Nothing) -> Just $ Map.insert y ex            env
+    (Nothing, Just ey) -> Just $ Map.insert x ey            env
+    (Just ex, Just ey) -> undefined {- Probably no extension, we need to check if ex and ey are unifiable -}
+
+solveSimpleEqI :: SimpleEq -> PmVarEnv -> Maybe PmVarEnv
+solveSimpleEqI (x, e) env =
+  case Map.lookup x env of
+    Nothing -> Just $ Map.insert x e env
+    Just ex -> undefined {- Just like final case of solveVarEq with e and ex this time -}
+
+solveComplexEqI :: ComplexEq -> PmVarEnv -> Maybe PmVarEnv
+solveComplexEqI (e1,e2) env = undefined {- Just like the above final cases -}
+
+{-
+%************************************************************************
+%*                                                                      *
 \subsection{Pretty Printing}
 %*                                                                      *
 %************************************************************************
@@ -1246,17 +1309,18 @@ instance Outputable PmConstraint where
   ppr (BtConstraint x)      = braces (ppr x <+> ptext (sLit "~") <+> ptext (sLit "_|_"))
 
 instance Outputable (PmPat abs) where
-  ppr (GBindAbs pats expr) = ppr pats <+> ptext (sLit "<-") <+> ppr expr
-  ppr (ConAbs con args)    = sep [ppr con, pprWithParens args]
-  ppr (VarAbs x)           = ppr x
+  ppr (GBindAbs pats expr)          = ppr pats <+> ptext (sLit "<-") <+> ppr expr
+  ppr (ConAbs { cabs_con  = con
+              , cabs_args = args }) = sep [ppr con, pprWithParens args]
+  ppr (VarAbs x)                    = ppr x
 
 instance Outputable ValSetAbs where
   ppr = pprValSetAbs
 
 pprWithParens :: [PmPat abs] -> SDoc
 pprWithParens pats = sep (map paren_if_needed pats)
-  where paren_if_needed p | ConAbs _ args <- p, not (null args) = parens (ppr p)
-                          | GBindAbs ps _ <- p, not (null ps)   = parens (ppr p)
+  where paren_if_needed p | ConAbs { cabs_args = args } <- p, not (null args) = parens (ppr p)
+                          | GBindAbs ps _               <- p, not (null ps)   = parens (ppr p)
                           | otherwise = ppr p
 
 pprValSetAbs :: ValSetAbs -> SDoc
