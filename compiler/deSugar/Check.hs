@@ -186,7 +186,11 @@ check tys eq_info
       return $ mb_res >>= \(rs, is, us) -> return (rs, is, valSetAbsToList us)
 
 check' :: [EquationInfo] -> ValSetAbs -> DsM (Maybe ([EquationInfo], [EquationInfo], ValSetAbs))
-check' [] missing = return $ Just ([], [], missing)
+check' [] missing = do
+  missing' <- pruneValSetAbs missing
+  return $ case missing' of
+    Nothing -> Nothing
+    Just u  -> Just ([], [], u)
 check' (eq:eqs) missing = do
   -- Translate and process current clause
   usupply <- getUniqueSupplyM
@@ -390,8 +394,7 @@ patVectProc vec vsa = do
   usD <- getUniqueSupplyM
   mb_c <- anySatValSetAbs (covered   usC vec vsa)
   mb_d <- anySatValSetAbs (divergent usD vec vsa)
-  mb_u <- pruneValSetAbs  (uncovered usU vec vsa)
-  return $ liftM3 (,,) mb_c mb_d mb_u
+  return $ liftM3 (,,) mb_c mb_d (Just $ uncovered usU vec vsa)
 
 -- ----------------------------------------------------------------------------
 -- | Main function 1 (covered)
