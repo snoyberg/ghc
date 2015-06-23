@@ -62,6 +62,7 @@ import Data.Map (Map)
 import Data.List (foldl')
 import Data.Maybe (isNothing, fromJust)
 import Control.Arrow (first, second)
+import DsGRHSs (isTrueLHsExpr)
 
 {-
 This module checks pattern matches for:
@@ -532,6 +533,65 @@ divergent _usupply []               (Cons _ _) = panic "divergent: length mismat
 
 -- ----------------------------------------------------------------------------
 -- | Basic utilities
+
+-- ****************************************************************************
+-- ****************************************************************************
+
+-- drop \tau_x ~ \tau
+mkOneConFull :: Id {- x -} -> UniqSupply -> DataCon {- K_i -} -> (ValAbs, [PmConstraint])
+mkOneConFull x usupply con = ...
+
+(listToBag theta_cs `unionBags` arg_cs `unionBags` res_eq) -- the constraints
+
+  where
+    res_ty = idType x -- Get the result type from the variable we want to be unified with
+                      -- Otherwise pass explicitly cabs@(Ki ps) so the res_ty will be:
+                      -- res_ty == TyConApp (dataConTyCon (cabs_con cabs)) (cabs_arg_tys cabs)
+
+    -- ConAbs { cabs_con     :: DataCon
+    --        , cabs_arg_tys :: [Type]
+    --        , cabs_tvs     :: [TyVar]
+    --        , cabs_dicts   :: [EvVar]
+    --        , cabs_args    :: [PmPat abs] }
+
+    --            ==> univ_tys          = cabs_arg_tys
+    --            ==> ex_tys            = cabs_tvs
+    --            ==> eq_speq ++ thetas = cabs_dicts
+    --            ==> arg_tys           = ???
+    --            ==> dc_res_ty         = NO NEED TO HAVE IT. WE CAN CONSTRUCT IT BY APPLYING {T} to {univ_tys}
+
+    (univ_tvs, ex_tvs, eq_spec, thetas, arg_tys, dc_res_ty) = dataConFullSig con
+    data_tc = dataConTyCon con   -- The representation TyCon
+
+    mb_tc_args = case splitTyConApp_maybe res_ty of
+                   Nothing -> Nothing
+                   Just (res_tc, res_tc_tys)
+                     | Just (fam_tc, fam_args, _) <- tyConFamInstSig_maybe data_tc
+                     , let fam_tc_tvs = tyConTyVars fam_tc
+                     -> ASSERT( res_tc == fam_tc )
+                        case tcMatchTys (mkVarSet fam_tc_tvs) fam_args res_tc_tys of
+                          Just fam_subst -> Just (map (substTyVar fam_subst) fam_tc_tvs)
+                          Nothing        -> Nothing
+                     | otherwise
+                     -> ASSERT( res_tc == data_tc ) Just res_tc_tys
+
+    -- ************************************************************************
+    (subst, res_eq) = case mb_tc_args of
+      Nothing  -> -- The context type doesn't have a type constructor at the head.
+                  -- so generate an equality.  But this doesn't really work if there
+                  -- are kind variables involved
+                  let {- FIXME -} (subst, _) = genInstSkolTyVars loc univ_tvs
+                      {- FIXME -} res_eq     = newEqPmM {- USUPPLY -} (substTy subst dc_res_ty) res_ty
+                  in  (if any isKindVar univ_tvs
+                         then trace "checkTyPmPat: Danger! Kind variables" ()
+                         else ()) `seq` (subst, unitBag res_eq)
+      Just tys -> (zipTopTvSubst univ_tvs tys, emptyBag)
+
+    {- FIXME -} (subst, _) = genInstSkolTyVarsX loc subst ex_tvs
+    {- FIXME -} arg_cs     = checkTyPmPats args (substTys subst arg_tys) -- Make it pure first to make this work
+    theta_cs   = substTheta subst (eqSpecPreds eq_spec ++ thetas)
+-- ****************************************************************************
+-- ****************************************************************************
 
 mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
 mkOneConFull x usupply con = (con_abs, all_cs)
