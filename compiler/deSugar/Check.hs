@@ -88,25 +88,65 @@ data PmConstraint = TmConstraint Id PmExpr -- Term equalities: x ~ e
                   | TyConstraint [EvVar]   -- Type equalities
                   | BtConstraint [Id]      -- Strictness constraints: x ~ _|_
 
-data Abstraction = P | V
+data Abstraction = P | V   -- Used to parameterise PmPat
+
+type ValAbs = PmPat 'V -- Value Abstraction
+type Pat    = PmPat 'P -- Pattern
+
+type PatVec   = [Pat]    -- Just a type synonym for pattern vectors ps
+type ValueVec = [ValAbs] -- Just a type synonym for velue   vectors as
+
+-- The differnence between patterns (PmPat 'P)
+-- and value abstractios (PmPat 'V)
+-- is that the patterns can contain guards (GBindAbs)
+-- and value abstractions cannot.  Enforced with a GADT.
 
 data PmPat :: Abstraction -> * where
   GBindAbs :: [PmPat 'P] -> PmExpr -> PmPat 'P    -- Guard: P <- e (strict by default) Instead of a single P use a list [AsPat]
+
   ConAbs   :: DataCon -> [PmPat abs] -> PmPat abs -- Constructor: K ps
+                                                  -- The patterns ps are the ones visible in the source language
+
   VarAbs   :: Id -> PmPat abs                     -- Variable: x
 
-type ValAbs     = PmPat 'V -- Value Abstraction
-type PatAbs     = PmPat 'P -- Pattern Abstraction
+-- data T a where
+--     MkT :: forall p q. (Eq p, Ord q) => p -> q -> T [p]
+-- or  MkT :: forall p q r. (Eq p, Ord q, [p] ~ r) => p -> q -> T r
 
-type PatternVec = [PatAbs] -- Just a type synonym for pattern vectors ps
-type ValueVec   = [ValAbs] -- Just a type synonym for velue   vectors as
+{- pats ::= pat1 .. patn
+   pat ::= K ex_tvs ev_vars pats arg_tys     -- K is from data type T
+                              -- Pattern has type T ty1 .. tyn
+         | var guards
+   guards ::= guard1 ... guardn
+   guard ::= e -> pat
+   arg_ts ::= ty1 .. tyn
+-}
 
-data ValSetAbs
+
+  ConAbs {
+        pat_con     :: DataCon
+        pat_arg_tys :: [Type],          -- The univeral arg types, 1-1 with the universal
+                                        -- tyvars of the constructor/pattern synonym
+                                        --   Use (conLikeResTy pat_con pat_arg_tys) to get
+                                        --   the type of the pattern
+
+        pat_tvs   :: [TyVar],           -- Existentially bound type variables (tyvars only)
+        pat_dicts :: [EvVar],           -- Ditto *coercion variables* and *dictionaries*
+                                        -- One reason for putting coercion variable here, I think,
+                                        --      is to ensure their kinds are zonked
+        pat_args :: [PmPat abs]
+    }
+
+data ValSetAbs   -- Reprsents a set of value vector abstractions
+                 -- Notionally each value vector abstraction is a triple (Gamma |- us |> Delta)
+                 -- where 'us'    is a ValueVec
+                 --       'Delta' is a constraint
   = Empty                               -- {}
   | Union ValSetAbs ValSetAbs           -- S1 u S2
   | Singleton                           -- { |- empty |> empty }
   | Constraint [PmConstraint] ValSetAbs -- Extend Delta
   | Cons ValAbs ValSetAbs               -- map (ucon u) vs
+
 
 type PmResult = ([EquationInfo], [EquationInfo], [([ValAbs],[PmConstraint])])
 
@@ -173,7 +213,7 @@ initial_uncovered usupply tys = foldr Cons Singleton val_abs_vec
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
 
-translatePat :: UniqSupply -> Pat Id -> PatternVec
+translatePat :: UniqSupply -> Pat Id -> PatVec
 translatePat usupply pat = case pat of
   WildPat ty         -> [mkPmVar usupply ty]
   VarPat  id         -> [VarAbs id]
@@ -207,7 +247,7 @@ translatePat usupply pat = case pat of
     let (usupply1, usupply2) = splitUniqSupply usupply
 
         (xp, xe) = mkPmId2Forms usupply1 (hsPatType pat)
-        ps = translatePats usupply2 (map unLoc lpats) -- list as value abstraction
+        ps = translatePatVec usupply2 (map unLoc lpats) -- list as value abstraction
 
         mkListPat x y = [ConAbs consDataCon (x++y)]      -- maybe make it a top-level function
         pats = foldr mkListPat [ConAbs nilDataCon []] ps -- maybe make it a top-level function
@@ -224,7 +264,7 @@ translatePat usupply pat = case pat of
     [mkPmVar usupply (hsPatType pat)]
 
   ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps } ->
-    [ConAbs con (translateConPats usupply con ps)]
+    [ConAbs con (translateConPatVec usupply con ps)]
 
   NPat lit mb_neg eq ->
     let var   = mkPmId usupply (hsPatType pat)
@@ -239,17 +279,17 @@ translatePat usupply pat = case pat of
     in  [VarAbs var, guard]
 
   ListPat ps ty Nothing ->
-    let tidy_ps       = translatePats usupply (map unLoc ps)
+    let tidy_ps       = translatePatVec usupply (map unLoc ps)
         mkListPat x y = [ConAbs consDataCon (x++y)]
     in  foldr mkListPat [ConAbs nilDataCon []] tidy_ps
 
   PArrPat ps tys ->
-    let tidy_ps  = translatePats usupply (map unLoc ps)
+    let tidy_ps  = translatePatVec usupply (map unLoc ps)
         fake_con = parrFakeCon (length ps)
     in  [ConAbs fake_con (concat tidy_ps)]
 
   TuplePat ps boxity tys ->
-    let tidy_ps   = translatePats usupply (map unLoc ps)
+    let tidy_ps   = translatePatVec usupply (map unLoc ps)
         tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
     in  [ConAbs tuple_con (concat tidy_ps)]
 
@@ -260,22 +300,22 @@ translatePat usupply pat = case pat of
   QuasiQuotePat {} -> panic "Check.translatePat: QuasiQuotePat"
   SigPatIn {}      -> panic "Check.translatePat: SigPatIn"
 
-translatePats :: UniqSupply -> [Pat Id] -> [PatternVec] -- Do not concatenate them (sometimes we need them separately)
-translatePats usupply pats = map (uncurry translatePat) uniqs_pats
+translatePatVec :: UniqSupply -> [Pat Id] -> [PatVec] -- Do not concatenate them (sometimes we need them separately)
+translatePatVec usupply pats = map (uncurry translatePat) uniqs_pats
   where uniqs_pats = listSplitUniqSupply usupply `zip` pats
 
 -- -----------------------------------------------------------------------
 -- Temporary function (drops the guard (MR at the moment))
-translateEqnInfo :: UniqSupply -> EquationInfo -> PatternVec
-translateEqnInfo usupply (EqnInfo { eqn_pats = ps }) = concat $ translatePats usupply ps
+translateEqnInfo :: UniqSupply -> EquationInfo -> PatVec
+translateEqnInfo usupply (EqnInfo { eqn_pats = ps }) = concat $ translatePatVec usupply ps
 -- -----------------------------------------------------------------------
 
-translateConPats :: UniqSupply -> DataCon -> HsConPatDetails Id -> PatternVec
-translateConPats usupply _ (PrefixCon ps)   = concat (translatePats usupply (map unLoc ps))
-translateConPats usupply _ (InfixCon p1 p2) = concat (translatePats usupply (map unLoc [p1,p2]))
-translateConPats usupply c (RecCon (HsRecFields fs _))
+translateConPatVec :: UniqSupply -> DataCon -> HsConPatDetails Id -> PatVec
+translateConPatVec usupply _ (PrefixCon ps)   = concat (translatePatVec usupply (map unLoc ps))
+translateConPatVec usupply _ (InfixCon p1 p2) = concat (translatePatVec usupply (map unLoc [p1,p2]))
+translateConPatVec usupply c (RecCon (HsRecFields fs _))
   | null fs   = map (uncurry mkPmVar) $ listSplitUniqSupply usupply `zip` dataConOrigArgTys c
-  | otherwise = concat (translatePats usupply (map (unLoc . snd) all_pats))
+  | otherwise = concat (translatePatVec usupply (map (unLoc . snd) all_pats))
   where
     -- TODO: The functions below are ugly and they do not care much about types too
     field_pats = map (\lbl -> (lbl, noLoc (WildPat (dataConFieldType c lbl)))) (dataConFieldLabels c)
@@ -298,7 +338,7 @@ translateConPats usupply c (RecCon (HsRecFields fs _))
 -- ----------------------------------------------------------------------------
 -- | Process a vector
 
-patVectProc :: PatternVec -> ValSetAbs -> PmM (Maybe (Bool, Bool, ValSetAbs)) -- Covers? Forces? U(n+1)?
+patVectProc :: PatVec -> ValSetAbs -> PmM (Maybe (Bool, Bool, ValSetAbs)) -- Covers? Forces? U(n+1)?
 patVectProc vec vsa = do
   usC <- getUniqueSupplyM
   usU <- getUniqueSupplyM
@@ -311,7 +351,7 @@ patVectProc vec vsa = do
 -- ----------------------------------------------------------------------------
 -- | Main function 1 (covered)
 
-covered :: UniqSupply -> PatternVec -> ValSetAbs -> ValSetAbs
+covered :: UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
 
 -- CEmpty (New case because of representation)
 covered _usupply _vec Empty = Empty
@@ -359,7 +399,7 @@ covered _usupply []               (Cons _ _) = panic "covered: length mismatch: 
 -- ----------------------------------------------------------------------------
 -- | Main function 2 (uncovered)
 
-uncovered :: UniqSupply -> PatternVec -> ValSetAbs -> ValSetAbs
+uncovered :: UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
 
 -- UEmpty (New case because of representation)
 uncovered _usupply _vec Empty = Empty
@@ -412,7 +452,7 @@ uncovered _usupply []               (Cons _ _) = panic "uncovered: length mismat
 -- ----------------------------------------------------------------------------
 -- | Main function 3 (divergent)
 
-divergent :: UniqSupply -> PatternVec -> ValSetAbs -> ValSetAbs
+divergent :: UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
 
 -- DEmpty (New case because of representation)
 divergent _usupply _vec Empty = Empty
@@ -712,14 +752,14 @@ tyOracle evs
 --              Just tys -> return (zipTopTvSubst univ_tvs tys, emptyBag)
 -- 
 --   (subst, _) <- genInstSkolTyVarsX loc subst ex_tvs
---   arg_cs     <- checkTyPmPats args (substTys subst arg_tys)
+--   arg_cs     <- checkTyPmPatVec args (substTys subst arg_tys)
 --   theta_cs   <- mapM (nameType "varcon") $
 --                 substTheta subst (eqSpecPreds eq_spec ++ thetas)
 -- 
 --   return (listToBag theta_cs `unionBags` arg_cs `unionBags` res_eq)
 -- 
--- checkTyPmPats :: [PmPat Id] -> [Type] -> PmM (Bag EvVar)
--- checkTyPmPats pats tys
+-- checkTyPmPatVec :: [PmPat Id] -> [Type] -> PmM (Bag EvVar)
+-- checkTyPmPatVec pats tys
 --   = do { cs <- zipWithM checkTyPmPat pats tys
 --        ; return (unionManyBags cs) }
 
@@ -736,7 +776,7 @@ genInstSkolTyVars loc tvs = genInstSkolTyVarsX loc emptyTvSubst tvs
 -- wt :: [Type] -> OutVec -> PmM Bool
 -- wt sig (_, vec)
 --   | length sig == length vec = do
---       cs     <- checkTyPmPats vec sig
+--       cs     <- checkTyPmPatVec vec sig
 --       env_cs <- getDictsDs
 --       tyOracle (cs `unionBags` env_cs)
 --   | otherwise = pprPanic "wt: length mismatch:" (ppr sig $$ ppr vec)
