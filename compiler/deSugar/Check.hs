@@ -36,7 +36,7 @@ import TcType ( mkTcEqPred, toTcType, toTcTypeBag )
 import VarSet
 import Bag
 import ErrUtils
-import TcMType (genInstSkolTyVarsX)
+import TcMType (pureGenInstSkolTyVarsX, genInstSkolTyVarsX)
 import IOEnv (tryM, failM)
 
 import Data.Maybe (isJust)
@@ -573,77 +573,62 @@ divergent _usupply []               (Cons _ _) = panic "divergent: length mismat
 -- ----------------------------------------------------------------------------
 -- | Basic utilities
 
--- -- ****************************************************************************
--- -- ****************************************************************************
--- 
--- -- drop \tau_x ~ \tau
--- mkOneConFull :: Id {- x -} -> UniqSupply -> DataCon {- K_i -} -> (ValAbs, [PmConstraint])
--- mkOneConFull x usupply con = ...
--- 
--- (listToBag theta_cs `unionBags` arg_cs `unionBags` res_eq) -- the constraints
--- 
---   where
---     res_ty = idType x -- Get the result type from the variable we want to be unified with
---                       -- Otherwise pass explicitly cabs@(Ki ps) so the res_ty will be:
---                       -- res_ty == TyConApp (dataConTyCon (cabs_con cabs)) (cabs_arg_tys cabs)
--- 
---     -- ConAbs { cabs_con     :: DataCon
---     --        , cabs_arg_tys :: [Type]
---     --        , cabs_tvs     :: [TyVar]
---     --        , cabs_dicts   :: [EvVar]
---     --        , cabs_args    :: [PmPat abs] }
--- 
---     --            ==> univ_tys          = cabs_arg_tys
---     --            ==> ex_tys            = cabs_tvs
---     --            ==> eq_speq ++ thetas = cabs_dicts
---     --            ==> arg_tys           = ???
---     --            ==> dc_res_ty         = NO NEED TO HAVE IT. WE CAN CONSTRUCT IT BY APPLYING {T} to {univ_tys}
--- 
---     (univ_tvs, ex_tvs, eq_spec, thetas, arg_tys, dc_res_ty) = dataConFullSig con
---     data_tc = dataConTyCon con   -- The representation TyCon
--- 
---     tc_args = case splitTyConApp_mabye res_ty of
---                  Just (tc, tys) -> ASSERT( tc == data_tc ) tys
---                  Nothing -> panic
--- 
---     
--- 
---     -- ************************************************************************
---     (subst, res_eq) = case mb_tc_args of
---       Nothing  -> -- The context type doesn't have a type constructor at the head.
---                   -- so generate an equality.  But this doesn't really work if there
---                   -- are kind variables involved
---                   let {- FIXME -} (subst, _) = genInstSkolTyVars loc univ_tvs
---                       {- FIXME -} res_eq     = newEqPmM {- USUPPLY -} (substTy subst dc_res_ty) res_ty
---                   in  (if any isKindVar univ_tvs
---                          then trace "checkTyPmPat: Danger! Kind variables" ()
---                          else ()) `seq` (subst, unitBag res_eq)
---       Just tys -> (zipTopTvSubst univ_tvs tys, emptyBag)
--- 
---     {- FIXME -} (subst, _) = genInstSkolTyVarsX loc subst ex_tvs
---     {- FIXME -} arg_cs     = checkTyPmPats args (substTys subst arg_tys) -- Make it pure first to make this work
---     theta_cs   = substTheta subst (eqSpecPreds eq_spec ++ thetas)
--- -- ****************************************************************************
--- -- ****************************************************************************
-
 mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
--- Invariant:  x :: T tys, where T is an algebraic data type
-mkOneConFull x usupply con = (con_abs, all_cs)
+mkOneConFull x usupply con = (con_abs, constraints)
   where
-    -- Some more uniqSupplies
+
     (usupply1, usupply') = splitUniqSupply usupply
     (usupply2, usupply3) = splitUniqSupply usupply'
 
-    -- Instantiate variable with the approproate constructor pattern
-    (_tvs, qs, _arg_tys, res_ty) = dataConSig con -- take the constructor apart
-    con_abs = mkConFull usupply1 con -- (Ki ys), ys fresh
+    res_ty = idType x -- res_ty == TyConApp (dataConTyCon (cabs_con cabs)) (cabs_arg_tys cabs)
+    (univ_tvs, ex_tvs, eq_spec, thetas, arg_tys, dc_res_ty) = dataConFullSig con
+    data_tc = dataConTyCon con   -- The representation TyCon
+    tc_args = case splitTyConApp_maybe res_ty of
+                 Just (tc, tys) -> ASSERT( tc == data_tc ) tys
+                 Nothing -> pprPanic "mkOneConFull: Not a type application" (ppr res_ty)
 
-    -- All generated/collected constraints
-    ty_eq_ct = TyConstraint [newEqPmM usupply2 (idType x) res_ty]  -- type_eq: tau_x ~ tau (result type of the constructor)
-    tm_eq_ct = TmConstraint x (valAbsToPmExpr con_abs)             -- term_eq: x ~ K ys
-    uniqs_cs = listSplitUniqSupply usupply3 `zip` qs
-    thetas   = map (uncurry (nameType "cconvar")) uniqs_cs         -- constructors_thetas: the Qs from K's sig
-    all_cs   = [tm_eq_ct, ty_eq_ct, TyConstraint thetas]           -- all constraints
+    subst1  = zipTopTvSubst univ_tvs tc_args
+
+    -- IS THE SECOND PART OF THE TUPLE THE SET OF FRESHENED EXISTENTIALS? MUST BE
+    (subst, tvs) = pureGenInstSkolTyVarsX usupply1 noSrcSpan subst1 ex_tvs
+
+    arguments  = mkConVars usupply2 (substTys subst arg_tys)      -- Constructor arguments (value abstractions)
+    theta_cs   = substTheta subst (eqSpecPreds eq_spec ++ thetas) -- All the constraints bound by the constructor
+
+    evvars = map (uncurry (nameType "oneCon")) $ zip (listSplitUniqSupply usupply3) theta_cs
+    con_abs    = ConAbs { cabs_con     = con
+                        , cabs_arg_tys = tc_args
+                        , cabs_tvs     = tvs
+                        , cabs_dicts   = evvars
+                        , cabs_args    = arguments }
+
+    constraints = [ TmConstraint x (valAbsToPmExpr con_abs)
+                  , TyConstraint evvars ] -- Both term and type constraints
+
+-- mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
+-- -- Invariant:  x :: T tys, where T is an algebraic data type
+-- mkOneConFull x usupply con = (con_abs, all_cs)
+--   where
+--     -- Some more uniqSupplies
+--     (usupply1, usupply') = splitUniqSupply usupply
+--     (usupply2, usupply3) = splitUniqSupply usupply'
+-- 
+--     -- Instantiate variable with the approproate constructor pattern
+--     (_tvs, qs, _arg_tys, res_ty) = dataConSig con -- take the constructor apart
+--     con_abs = mkConFull usupply1 con -- (Ki ys), ys fresh
+-- 
+--     -- All generated/collected constraints
+--     ty_eq_ct = TyConstraint [newEqPmM usupply2 (idType x) res_ty]  -- type_eq: tau_x ~ tau (result type of the constructor)
+--     tm_eq_ct = TmConstraint x (valAbsToPmExpr con_abs)             -- term_eq: x ~ K ys
+--     uniqs_cs = listSplitUniqSupply usupply3 `zip` qs
+--     thetas   = map (uncurry (nameType "cconvar")) uniqs_cs         -- constructors_thetas: the Qs from K's sig
+--     all_cs   = [tm_eq_ct, ty_eq_ct, TyConstraint thetas]           -- all constraints
+
+-- | To replace mkConFull.
+mkConVars :: UniqSupply -> [Type] -> [ValAbs] -- ys, fresh with the given type
+mkConVars usupply tys = map (uncurry mkPmVar) $
+  zip (listSplitUniqSupply usupply) tys
+
 
 mkConFull :: UniqSupply -> DataCon -> ValAbs
 mkConFull usupply con = mkPmConPat con [] [] [] {- FIXME -} args

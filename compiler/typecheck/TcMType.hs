@@ -30,6 +30,11 @@ module TcMType (
   -- Creating fresh type variables for pm checking
   genInstSkolTyVarsX,
 
+  -- Pure versions
+  pureGenInstSkolTyVarsX,
+  pureInstSkolTyVarsX,
+  pureInstSkolTyVarX,
+
   --------------------------------
   -- Creating new evidence variables
   newEvVar, newEvVars, newEq, newDict,
@@ -87,6 +92,7 @@ import Outputable
 import FastString
 import SrcLoc
 import Bag
+import UniqSupply (UniqSupply, splitUniqSupply, uniqFromSupply)
 
 import Control.Monad
 import Data.List        ( partition, mapAccumL )
@@ -1011,3 +1017,34 @@ genInstSkolTyVarsX :: SrcSpan -> TvSubst -> [TyVar] -> TcRnIf gbl lcl (TvSubst, 
 -- see Note [Kind substitution when instantiating]
 -- Get the location from the monad; this is a complete freshening operation
 genInstSkolTyVarsX loc subst tvs = instSkolTyVarsX (mkTcSkolTyVar loc False) subst tvs
+
+-- PURE VERSIONS
+pureGenInstSkolTyVarsX :: UniqSupply -> SrcSpan -> TvSubst -> [TyVar] -> (TvSubst, [TcTyVar])
+pureGenInstSkolTyVarsX usupply loc subst tvs
+  = pureInstSkolTyVarsX usupply (mkTcSkolTyVar loc False) subst tvs
+
+pureInstSkolTyVarsX :: UniqSupply
+                    -> (Unique -> Name -> Kind -> TyVar)
+                    -> TvSubst
+                    -> [TyVar]
+                    -> (TvSubst, [TyVar])
+pureInstSkolTyVarsX us mk_tv subst
+  = mapAccumLU (pureInstSkolTyVarX mk_tv) (us,subst)
+  where
+    mapAccumLU :: (UniqSupply -> acc -> x -> (acc, y))
+               -> (UniqSupply, acc) -> [x] -> (acc, [y])
+    mapAccumLU f (u,s) []     = (s,[])
+    mapAccumLU f (u,s) (x:xs) = let (us1, us2) = splitUniqSupply u
+                                    (s' , y ) = f us1 s x
+                                    (s'', ys) = mapAccumLU f (us2,s') xs
+                                in  (s'', y:ys)
+
+pureInstSkolTyVarX :: (Unique -> Name -> Kind -> TyVar)
+                   -> UniqSupply -> TvSubst -> TyVar -> (TvSubst, TyVar)
+pureInstSkolTyVarX mk_tv usupply subst tyvar
+  = (extendTvSubst subst tyvar (mkTyVarTy new_tv), new_tv)
+  where
+    new_tv   = mk_tv (uniqFromSupply usupply) old_name kind
+    old_name = tyVarName tyvar
+    kind     = substTy subst (tyVarKind tyvar)
+
