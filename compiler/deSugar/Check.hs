@@ -60,7 +60,7 @@ import Control.Monad.Trans.Class (lift)
 import qualified Data.Map as Map
 import Data.Map (Map)
 import Data.List (foldl')
-
+import Data.Maybe (isNothing, fromJust)
 import Control.Arrow (first, second)
 
 {-
@@ -86,7 +86,7 @@ type PmM a = DsM a
 
 data PmConstraint = TmConstraint Id PmExpr -- Term equalities: x ~ e
                   | TyConstraint [EvVar]   -- Type equalities
-                  | BtConstraint [Id]      -- Strictness constraints: x ~ _|_
+                  | BtConstraint Id        -- Strictness constraints: x ~ _|_
 
 data Abstraction = P | V   -- Used to parameterise PmPat
 
@@ -488,7 +488,7 @@ divergent usupply (ConAbs c1 args1 : ps) (Cons (ConAbs c2 args2) vsa)
 
 -- DConVar [NEEDS WORK]
 divergent usupply (ConAbs con args : ps) (Cons (VarAbs x) vsa)
-  = Union (Cons (VarAbs x) (Constraint [BtConstraint [x]] vsa))
+  = Union (Cons (VarAbs x) (Constraint [BtConstraint x] vsa))
           (divergent usupply2 (ConAbs con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa)))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
@@ -638,13 +638,13 @@ valSetAbsToList Singleton           = [([],[])]
 valSetAbsToList (Constraint cs vsa) = [(vs, cs ++ cs') | (vs, cs') <- valSetAbsToList vsa]
 valSetAbsToList (Cons va vsa)       = [(va:vs, cs) | (vs, cs) <- valSetAbsToList vsa]
 
-splitConstraints :: [PmConstraint] -> ([EvVar], [(Id, PmExpr)], [Id]) -- Type constraints, term constraints, forced variables
-splitConstraints [] = ([],[],[])
+splitConstraints :: [PmConstraint] -> ([EvVar], [(Id, PmExpr)], Maybe Id) -- Type constraints, term constraints, forced variables
+splitConstraints [] = ([],[],Nothing)
 splitConstraints (c : rest)
   = case c of
       TyConstraint cs  -> (cs ++ ty_cs, tm_cs, bot_cs)
       TmConstraint x e -> (ty_cs, (x,e):tm_cs, bot_cs)
-      BtConstraint cs  -> (ty_cs, tm_cs, cs ++ bot_cs)
+      BtConstraint cs  -> ASSERT (isNothing bot_cs) (ty_cs, tm_cs, Just cs) -- NB: Only one x ~ _|_
   where
     (ty_cs, tm_cs, bot_cs) = splitConstraints rest
 
@@ -667,10 +667,10 @@ satisfiable constraints = do
       Left failure -> return $ failure >> return False -- inconsistent term constraints/overloaded syntax
       Right (residual, (expr_eqs, mapping)) ->
         let finals = forcedVars mapping -- lazily
-            answer = null bot_cs      || -- just term eqs ==> OK (success)
+            answer = isNothing bot_cs || -- just term eqs ==> OK (success)
                      notNull residual || -- something we cannot reason about -- gives inaccessible while it shouldn't
                      notNull expr_eqs || -- something we cannot reason about
-                     all (`Map.notMember` finals) bot_cs
+                     fromJust bot_cs `Map.notMember` finals
         in  return $ Just answer
     False -> return (Just False) -- inconsistent type constraints
 
@@ -1242,9 +1242,8 @@ pprUncovered vsa = vcat (map pprOne vsa)
 
 instance Outputable PmConstraint where
   ppr (TmConstraint x expr) = ppr x <+> equals <+> ppr expr
-  ppr (TyConstraint theta)  = pprSet $ map idType theta
-  ppr (BtConstraint bots)   = let ppr_bot x = ppr x <+> ptext (sLit "~") <+> ptext (sLit "_|_")
-                              in  braces (pprWithCommas ppr_bot bots)
+  ppr (TyConstraint theta)  = empty -- pprSet $ map idType theta
+  ppr (BtConstraint x)      = braces (ppr x <+> ptext (sLit "~") <+> ptext (sLit "_|_"))
 
 instance Outputable (PmPat abs) where
   ppr (GBindAbs pats expr) = ppr pats <+> ptext (sLit "<-") <+> ppr expr
