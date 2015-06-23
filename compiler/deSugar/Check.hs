@@ -699,19 +699,31 @@ satisfiable constraints = do
     True -> case tmOracle tm_cs of
       Left failure -> return $ failure >> return False -- inconsistent term constraints/overloaded syntax
       Right (residual, (expr_eqs, mapping)) ->
-        let finals = forcedVars mapping -- lazily
-            answer = isNothing bot_cs || -- just term eqs ==> OK (success)
+        let answer = isNothing bot_cs || -- just term eqs ==> OK (success)
                      notNull residual || -- something we cannot reason about -- gives inaccessible while it shouldn't
                      notNull expr_eqs || -- something we cannot reason about
-                     fromJust bot_cs `Map.notMember` finals
+                     isForced (fromJust bot_cs) mapping
         in  return $ Just answer
     False -> return (Just False) -- inconsistent type constraints
 
+-- | For coverage & laziness
 anySatValSetAbs :: ValSetAbs -> PmM (Maybe Bool)
-anySatValSetAbs vsa = do
-  mb_vsa <- pruneValSetAbs vsa
-  return $ liftM isNotEmptyValSetAbs mb_vsa
+anySatValSetAbs = anySatValSetAbs' []
+  where
+    anySatValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM (Maybe Bool)
+    anySatValSetAbs' _cs Empty                = return (Just False)
+    anySatValSetAbs'  cs (Union vsa1 vsa2)    = orM (anySatValSetAbs' cs vsa1) (anySatValSetAbs' cs vsa2)
+    anySatValSetAbs'  cs Singleton            = satisfiable cs
+    anySatValSetAbs'  cs (Constraint cs' vsa) = anySatValSetAbs' (cs' ++ cs) vsa -- in front for faster concatenation
+    anySatValSetAbs'  cs (Cons va vsa)        = anySatValSetAbs' cs vsa
 
+    orM m1 m2 = m1 >>= \x ->
+      case x of
+        Nothing    -> return Nothing
+        Just True  -> return (Just True)
+        Just False -> m2
+
+-- | For exhaustiveness check
 pruneValSetAbs :: ValSetAbs -> PmM (Maybe ValSetAbs)
 pruneValSetAbs = pruneValSetAbs' []
   where
@@ -974,15 +986,8 @@ isFalsePmExpr :: PmExpr -> Bool
 isFalsePmExpr (PmExprCon c []) = c == falseDataCon
 isFalsePmExpr _other_expr      = False
 
---   ConAbs   { cabs_con     :: DataCon
---            -- , cabs_arg_tys :: [Type]          -- The univeral arg types, 1-1 with the universal
---            --                                   -- tyvars of the constructor/pattern synonym
---            --                                   --   Use (conLikeResTy pat_con pat_arg_tys) to get
---            --                                   --   the type of the pattern
--- 
---            -- , cabs_tvs     :: [TyVar]         -- Existentially bound type variables (tyvars only)
---            -- , cabs_dicts   :: [EvVar]         -- Ditto *coercion variables* and *dictionaries*
---            , cabs_args    :: [PmPat abs] } :: PmPat abs
+isTrivialTrueLHsExpr :: LHsExpr Id -> Bool
+isTrivialTrueLHsExpr lexpr = isJust (isTrueLHsExpr lexpr)
 
 -- ----------------------------------------------------------------------------
 -- | Substitution for PmExpr
@@ -1212,12 +1217,11 @@ getValuePmExpr env (PmExprCon c es) = PmExprCon c (map (getValuePmExpr env) es)
 getValuePmExpr env (PmExprEq e1 e2) = PmExprEq (getValuePmExpr env e1) (getValuePmExpr env e2)
 getValuePmExpr _   other_expr       = other_expr
 
-forcedVars :: PmVarEnv -> PmVarEnv
-forcedVars env = Map.filter isForced $ Map.map (getValuePmExpr env) env --terminal elements point to themselves
-  where
-    isForced :: PmExpr -> Bool
-    isForced (PmExprVar _) = False
-    isForced _other_pmexpr = True
+isForced :: Id -> PmVarEnv -> Bool
+isForced x env = case getValuePmExpr env (PmExprVar x) of
+  PmExprVar _ -> False
+  _other_expr -> True
+
 -- ----------------------------------------------------------------------------
 
 -- NOTE [Representation of substitution]
@@ -1278,24 +1282,25 @@ forcedVars env = Map.filter isForced $ Map.map (getValuePmExpr env) env --termin
 %************************************************************************
 -}
 
--- | The env is always a FINAL MAP. NO REDIRECTION
--- Assume in input, preserve in output
+emptyPmVarEnv :: PmVarEnv
+emptyPmVarEnv = Map.empty
+
 solveVarEqI :: VarEq -> PmVarEnv -> Maybe PmVarEnv
 solveVarEqI (x,y) env =
   case (Map.lookup x env, Map.lookup y env) of
     (Nothing, Nothing) -> Just $ Map.insert x (PmExprVar y) env
     (Just ex, Nothing) -> Just $ Map.insert y ex            env
     (Nothing, Just ey) -> Just $ Map.insert x ey            env
-    (Just ex, Just ey) -> undefined {- Probably no extension, we need to check if ex and ey are unifiable -}
+    (Just ex, Just ey) -> solveComplexEqI (ex,ey) env
 
 solveSimpleEqI :: SimpleEq -> PmVarEnv -> Maybe PmVarEnv
 solveSimpleEqI (x, e) env =
   case Map.lookup x env of
     Nothing -> Just $ Map.insert x e env
-    Just ex -> undefined {- Just like final case of solveVarEq with e and ex this time -}
+    Just ex -> solveComplexEqI (e,ex) env
 
 solveComplexEqI :: ComplexEq -> PmVarEnv -> Maybe PmVarEnv
-solveComplexEqI (e1,e2) env = undefined {- Just like the above final cases -}
+solveComplexEqI (e1,e2) env = undefined {- Actual Work -}
 
 {-
 %************************************************************************
