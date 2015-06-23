@@ -213,27 +213,29 @@ initial_uncovered usupply tys = foldr Cons Singleton val_abs_vec
 %************************************************************************
 -}
 
+-- -----------------------------------------------------------------------
+-- | Utilities
+
 truePmPat :: PmPat abs
-truePmPat = mkPmConPat trueDataCon []
+truePmPat = mkPmConPat trueDataCon [] [] [] []
 
 falsePmPat :: PmPat abs
-falsePmPat = mkPmConPat falseDataCon []
+falsePmPat = mkPmConPat falseDataCon [] [] [] []
 
--- NEEDS FIX
-nilPmPat :: PmPat abs
-nilPmPat = mkPmConPat nilDataCon []
+nilPmPat :: Type -> PmPat abs
+nilPmPat ty = mkPmConPat nilDataCon [ty] [] [] []
 
--- NEEDS FIX
-mkListPmPat :: [PmPat abs] -> [PmPat abs] -> [PmPat abs]
-mkListPmPat xs ys = [mkPmConPat consDataCon (xs++ys)]
+mkListPmPat :: Type -> [PmPat abs] -> [PmPat abs] -> [PmPat abs]
+mkListPmPat ty xs ys = [mkPmConPat consDataCon [ty] [] [] (xs++ys)]
 
--- NEEDS FIX: IGNORES EVERYTHING
-mkPmConPat :: DataCon -> [PmPat abs] -> PmPat abs
-mkPmConPat con args = ConAbs { cabs_con     = con
-                             , cabs_arg_tys = []
-                             , cabs_tvs     = []
-                             , cabs_dicts   = []
-                             , cabs_args    = args }
+mkPmConPat :: DataCon -> [Type] -> [TyVar] -> [EvVar] -> [PmPat abs] -> PmPat abs
+mkPmConPat con arg_tys ex_tvs dicts args
+  = ConAbs { cabs_con     = con
+           , cabs_arg_tys = arg_tys
+           , cabs_tvs     = ex_tvs
+           , cabs_dicts   = dicts
+           , cabs_args    = args }
+
 
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
@@ -254,9 +256,9 @@ translatePat usupply pat = case pat of
   CoPat wrapper p ty -> translatePat usupply p         -- TODO: Check if we need the coercion
   NPlusKPat n k ge minus ->
     let (xp, xe) = mkPmId2Forms usupply (idType (unLoc n))
-        ke = noLoc (HsOverLit k)               -- k as located expression
-        g1 = GBindAbs [truePmPat] $ PmExprOther $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
-        g2 = GBindAbs [VarAbs (unLoc n)]      $ PmExprOther $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
+        ke = noLoc (HsOverLit k)         -- k as located expression
+        g1 = GBindAbs [truePmPat]        $ PmExprOther $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
+        g2 = GBindAbs [VarAbs (unLoc n)] $ PmExprOther $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
     in  [xp, g1, g2]
 
   ViewPat lexpr lpat arg_ty ->
@@ -274,7 +276,7 @@ translatePat usupply pat = case pat of
         (xp, xe) = mkPmId2Forms usupply1 (hsPatType pat)
         ps = translatePatVec usupply2 (map unLoc lpats) -- list as value abstraction
 
-        pats = foldr mkListPmPat [nilPmPat] ps
+        pats = foldr (mkListPmPat elem_ty) [nilPmPat elem_ty] ps
 
         g  = GBindAbs pats $ PmExprOther $ HsApp (noLoc to_list) xe -- [...] <- toList x
     in  [xp,g]
@@ -287,8 +289,13 @@ translatePat usupply pat = case pat of
     -- But there are complications with GADTs etc, and this isn't done yet
     [mkPmVar usupply (hsPatType pat)]
 
-  ConPatOut { pat_con = L _ (RealDataCon con), pat_args = ps } ->
-    [mkPmConPat con (translateConPatVec usupply con ps)]
+  ConPatOut { pat_con     = L _ (RealDataCon con)
+            , pat_arg_tys = arg_tys
+            , pat_tvs     = ex_tvs
+            , pat_dicts   = dicts
+            , pat_args    = ps } ->
+    let args = translateConPatVec usupply con ps
+    in  [mkPmConPat con arg_tys ex_tvs dicts args]
 
   NPat lit mb_neg eq ->
     let var   = mkPmId usupply (hsPatType pat)
@@ -303,17 +310,17 @@ translatePat usupply pat = case pat of
     in  [VarAbs var, guard]
 
   ListPat ps ty Nothing ->
-    foldr mkListPmPat [nilPmPat] $ translatePatVec usupply (map unLoc ps)
+    foldr (mkListPmPat ty) [nilPmPat ty] $ translatePatVec usupply (map unLoc ps)
 
-  PArrPat ps tys ->
+  PArrPat ps ty ->
     let tidy_ps  = translatePatVec usupply (map unLoc ps)
         fake_con = parrFakeCon (length ps)
-    in  [mkPmConPat fake_con (concat tidy_ps)]
+    in  [mkPmConPat fake_con [ty] [] [] (concat tidy_ps)]
 
   TuplePat ps boxity tys ->
     let tidy_ps   = translatePatVec usupply (map unLoc ps)
         tuple_con = tupleCon (boxityNormalTupleSort boxity) (length ps)
-    in  [mkPmConPat tuple_con (concat tidy_ps)]
+    in  [mkPmConPat tuple_con tys  [] [] (concat tidy_ps)]
 
   -- --------------------------------------------------------------------------
   -- Not supposed to happen
@@ -409,8 +416,8 @@ covered usupply (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
   | otherwise = wrapK c1 (covered usupply (args1 ++ ps) (foldr consValSetAbs vsa args2))
 
 -- CConVar
-covered usupply (ConAbs { cabs_con = con, cabs_args = args } : ps) (Cons (VarAbs x) vsa)
-  = covered usupply2 (mkPmConPat con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa))
+covered usupply (cabs@(ConAbs { cabs_con = con, cabs_args = args }) : ps) (Cons (VarAbs x) vsa)
+  = covered usupply2 (cabs : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
@@ -452,13 +459,13 @@ uncovered usupply (VarAbs x : ps) (Cons va vsa)
 
 -- UConCon
 uncovered usupply (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
-            (Cons (ConAbs { cabs_con = c2, cabs_args = args2 }) vsa)
-  | c1 /= c2  = mkPmConPat c2 args2 `consValSetAbs` vsa
+       (Cons cabs@(ConAbs { cabs_con = c2, cabs_args = args2 }) vsa)
+  | c1 /= c2  = cabs `consValSetAbs` vsa
   | otherwise = wrapK c1 (uncovered usupply (args1 ++ ps) (foldr consValSetAbs vsa args2))
 
 -- UConVar
-uncovered usupply (ConAbs { cabs_con = con, cabs_args = args } : ps) (Cons (VarAbs x) vsa)
-  = uncovered usupply2 (mkPmConPat con args : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
+uncovered usupply (cabs@(ConAbs { cabs_con = con, cabs_args = args }) : ps) (Cons (VarAbs x) vsa)
+  = uncovered usupply2 (cabs : ps) inst_vsa -- instantiated vsa [x \mapsto K_j ys]
   where
     -- Some more uniqSupplies
     (usupply1, usupply2) = splitUniqSupply usupply
@@ -512,9 +519,9 @@ divergent usupply (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
   | otherwise = wrapK c1 (divergent usupply (args1 ++ ps) (foldr consValSetAbs vsa args2))
 
 -- DConVar [NEEDS WORK]
-divergent usupply (ConAbs { cabs_con = con, cabs_args = args } : ps) (Cons (VarAbs x) vsa)
+divergent usupply (cabs@(ConAbs { cabs_con = con, cabs_args = args }) : ps) (Cons (VarAbs x) vsa)
   = Union (Cons (VarAbs x) (Constraint [BtConstraint x] vsa))
-          (divergent usupply2 (mkPmConPat con args : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa)))
+          (divergent usupply2 (cabs : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa)))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
@@ -545,7 +552,7 @@ mkOneConFull x usupply con = (con_abs, all_cs)
     all_cs   = [tm_eq_ct, ty_eq_ct, TyConstraint thetas]           -- all constraints
 
 mkConFull :: UniqSupply -> DataCon -> ValAbs
-mkConFull usupply con = mkPmConPat con args
+mkConFull usupply con = mkPmConPat con [] [] [] {- FIXME -} args
   where
     uniqs_tys = listSplitUniqSupply usupply `zip` dataConOrigArgTys con
     args      = map (uncurry mkPmVar) uniqs_tys
@@ -567,7 +574,7 @@ wrapK con = wrapK_aux (dataConSourceArity con) emptylist
   where
     wrapK_aux :: Int -> DList ValAbs -> ValSetAbs -> ValSetAbs
     wrapK_aux _ _    Empty               = Empty
-    wrapK_aux 0 args vsa                 = mkPmConPat con (toList args) `consValSetAbs` vsa
+    wrapK_aux 0 args vsa                 = mkPmConPat con [] [] [] {- FIXME -} (toList args) `consValSetAbs` vsa
     wrapK_aux _ _    Singleton           = panic "wrapK: Singleton"
     wrapK_aux n args (Cons vs vsa)       = wrapK_aux (n-1) (args `snoc` vs) vsa
     wrapK_aux n args (Constraint cs vsa) = cs `addConstraints` wrapK_aux n args vsa
