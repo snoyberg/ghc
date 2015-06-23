@@ -140,6 +140,7 @@ data ValSetAbs   -- Reprsents a set of value vector abstractions
                  -- Notionally each value vector abstraction is a triple (Gamma |- us |> Delta)
                  -- where 'us'    is a ValueVec
                  --       'Delta' is a constraint
+  -- INVARIANT VsaInvariant: an empty ValSetAbs is always represented by Empty
   = Empty                               -- {}
   | Union ValSetAbs ValSetAbs           -- S1 u S2
   | Singleton                           -- { |- empty |> empty }
@@ -163,6 +164,10 @@ data PmExpr = PmExprVar   Id
             | PmExprNeg   (HsOverLit Id) -- Syntactic negation
             | PmExprEq    PmExpr PmExpr  -- Syntactic equality
             | PmExprOther (HsExpr Id)    -- NOTE [PmExprOther in PmExpr]
+
+decomopose (PmExprVar x) (PmExprVar y) = Just (x~y)
+decompose _ _ = Nothing
+
 
 {-
 %************************************************************************
@@ -217,17 +222,23 @@ initial_uncovered usupply tys = foldr Cons Singleton val_abs_vec
 -- -----------------------------------------------------------------------
 -- | Utilities
 
+nullaryPmConPat :: DataCon -> PmPat abs
+-- Nullary data constructor and nullary type constructor
+nullaryPmConPat con = PmConPat { cabs_con = con, cabs_arg_tys = []
+                               , cabs_ex_tvs = [], cabs_dicts = [], cabs_args = [] }
 truePmPat :: PmPat abs
-truePmPat = mkPmConPat trueDataCon [] [] [] []
+truePmPat = nullaryPmConPat trueDataCon
 
 falsePmPat :: PmPat abs
-falsePmPat = mkPmConPat falseDataCon [] [] [] []
+falsePmPat = nullaryPmConPat falseDataCon
 
 nilPmPat :: Type -> PmPat abs
 nilPmPat ty = mkPmConPat nilDataCon [ty] [] [] []
 
 mkListPmPat :: Type -> [PmPat abs] -> [PmPat abs] -> [PmPat abs]
-mkListPmPat ty xs ys = [mkPmConPat consDataCon [ty] [] [] (xs++ys)]
+mkListPmPat ty xs ys = [ConAbs { cabs_con = consDataCon, cabs_arg_tys = [ty]
+                               , cabs_tvs = [], cabs_dicts = []
+                               , cabs_args = xs++ys }]
 
 mkPmConPat :: DataCon -> [Type] -> [TyVar] -> [EvVar] -> [PmPat abs] -> PmPat abs
 mkPmConPat con arg_tys ex_tvs dicts args
@@ -241,20 +252,27 @@ mkPmConPat con arg_tys ex_tvs dicts args
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
 
+-- Make this monadic... probably in UniqSM
+
 translatePat :: UniqSupply -> Pat Id -> PatVec
 translatePat usupply pat = case pat of
   WildPat ty         -> [mkPmVar usupply ty]
   VarPat  id         -> [VarAbs id]
   ParPat p           -> translatePat usupply (unLoc p)
   LazyPat p          -> translatePat usupply (unLoc p) -- COMEHERE: We ignore laziness   for now
+
   BangPat p          -> translatePat usupply (unLoc p) -- COMEHERE: We ignore strictness for now
+                                                       -- This might affect the divergence checks?
   AsPat lid p ->
     let ps  = translatePat usupply (unLoc p)
         idp = VarAbs (unLoc lid)
         g   = GBindAbs ps (PmExprVar (unLoc lid))
     in  [idp, g]
+
   SigPatOut p ty     -> translatePat usupply (unLoc p) -- TODO: Use the signature?
   CoPat wrapper p ty -> translatePat usupply p         -- TODO: Check if we need the coercion
+
+  -- (n + k)  ===>   x (True <- x >= k) (n <- x-k)
   NPlusKPat n k ge minus ->
     let (xp, xe) = mkPmId2Forms usupply (idType (unLoc n))
         ke = noLoc (HsOverLit k)         -- k as located expression
@@ -262,6 +280,7 @@ translatePat usupply pat = case pat of
         g2 = GBindAbs [VarAbs (unLoc n)] $ PmExprOther $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
     in  [xp, g1, g2]
 
+  -- (fun -> pat)   ===>   x (pat <- fun x)
   ViewPat lexpr lpat arg_ty ->
     let (usupply1, usupply2) = splitUniqSupply usupply
 
@@ -271,10 +290,13 @@ translatePat usupply pat = case pat of
         g  = GBindAbs ps $ PmExprOther $ HsApp lexpr xe -- p <- f x
     in  [xp,g]
 
+  ListPat ps ty Nothing ->
+    foldr (mkListPmPat ty) [nilPmPat ty] $ translatePatVec usupply (map unLoc ps)
+
   ListPat lpats elem_ty (Just (pat_ty, to_list)) ->
     let (usupply1, usupply2) = splitUniqSupply usupply
 
-        (xp, xe) = mkPmId2Forms usupply1 (hsPatType pat)
+        (xp, xe) = mkPmId2Forms usupply1 pat_ty
         ps = translatePatVec usupply2 (map unLoc lpats) -- list as value abstraction
 
         pats = foldr (mkListPmPat elem_ty) [nilPmPat elem_ty] ps
@@ -309,9 +331,6 @@ translatePat usupply pat = case pat of
     let var   = mkPmId usupply (hsPatType pat)
         guard = eqTrueExpr $ PmExprEq (PmExprVar var) (PmExprLit lit)
     in  [VarAbs var, guard]
-
-  ListPat ps ty Nothing ->
-    foldr (mkListPmPat ty) [nilPmPat ty] $ translatePatVec usupply (map unLoc ps)
 
   PArrPat ps ty ->
     let tidy_ps  = translatePatVec usupply (map unLoc ps)
@@ -383,6 +402,24 @@ patVectProc vec vsa = do
 
 covered :: UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
 
+traverse :: WhatToTo -> UniqSupply -> ValSetAbs -> ValSetAbs
+
+data WhatToTo = WTD { wtd_empty :: Delta -> ValSetAbs
+                    , wtd_mismatch :: Bool   -- True  <=> return argument VSA
+                                             -- False <=> return Empty
+                    , wtd_cons :: PatVec -> ValAbs -> ValSetAbs -> ValSetAbs }
+traverse f us vsa
+  = case vsa of
+     Empty             -> Empty
+     Singleton         -> ASSERT( null pv ) Singleton
+     Union vsa1 vsa2   -> Union (traverse f us1 vsa1) (traverse f us2 vsa2)
+     Constraint cs vsa -> mkConstraint cs (traverse f us vsa)
+     Cons va vsa       -> f us pv va vsa
+
+
+covered pv us vsa = traverse (coveredCons pv) us vsa
+
+
 -- CEmpty (New case because of representation)
 covered _usupply _vec Empty = Empty
 
@@ -390,16 +427,18 @@ covered _usupply _vec Empty = Empty
 covered _usupply [] Singleton = Singleton
 
 -- Pure induction (New case because of representation)
-covered usupply vec (Union vsa1 vsa2) = covered usupply1 vec vsa1 `unionValSetAbs` covered usupply2 vec vsa2
+covered usupply vec (Union vsa1 vsa2)
+  = covered usupply1 vec vsa1 `unionValSetAbs` covered usupply2 vec vsa2
   where (usupply1, usupply2) = splitUniqSupply usupply
 
 -- Pure induction (New case because of representation)
-covered usupply vec (Constraint cs vsa) = cs `addConstraints` covered usupply vec vsa
+covered usupply vec (Constraint cs vsa) 
+  = cs `mkConstraint` covered usupply vec vsa
 
 -- CGuard
 covered usupply (GBindAbs p e : ps) vsa
   | vsa' <- tailValSetAbs $ covered usupply2 (p++ps) (VarAbs y `consValSetAbs` vsa)
-  = cs `addConstraints` vsa'
+  = cs `mkConstraint` vsa'
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     y  = mkPmId usupply1 anyTy -- CHECKME: Which type to use?
@@ -407,7 +446,7 @@ covered usupply (GBindAbs p e : ps) vsa
 
 -- CVar
 covered usupply (VarAbs x : ps) (Cons va vsa)
-  = va `consValSetAbs` (cs `addConstraints` covered usupply ps vsa)
+  = va `consValSetAbs` (cs `mkConstraint` covered usupply ps vsa)
   where cs = [TmConstraint x (valAbsToPmExpr va)]
 
 -- CConCon
@@ -418,7 +457,7 @@ covered usupply (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
 
 -- CConVar
 covered usupply (cabs@(ConAbs { cabs_con = con, cabs_args = args }) : ps) (Cons (VarAbs x) vsa)
-  = covered usupply2 (cabs : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa))
+  = covered usupply2 (cabs : ps) (con_abs `consValSetAbs` (all_cs `mkConstraint` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
@@ -443,11 +482,11 @@ uncovered usupply vec (Union vsa1 vsa2) = uncovered usupply1 vec vsa1 `unionValS
   where (usupply1, usupply2) = splitUniqSupply usupply
 
 -- Pure induction (New case because of representation)
-uncovered usupply vec (Constraint cs vsa) = cs `addConstraints` uncovered usupply vec vsa
+uncovered usupply vec (Constraint cs vsa) = cs `mkConstraint` uncovered usupply vec vsa
 
 -- UGuard
 uncovered usupply (GBindAbs p e : ps) vsa
-  = cs `addConstraints` (tailValSetAbs $ uncovered usupply2 (p++ps) (VarAbs y `consValSetAbs` vsa))
+  = cs `mkConstraint` (tailValSetAbs $ uncovered usupply2 (p++ps) (VarAbs y `consValSetAbs` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     y  = mkPmId usupply1 anyTy -- CHECKME: Which type to use?
@@ -455,7 +494,7 @@ uncovered usupply (GBindAbs p e : ps) vsa
 
 -- UVar
 uncovered usupply (VarAbs x : ps) (Cons va vsa)
-  = va `consValSetAbs` (cs `addConstraints` uncovered usupply ps vsa)
+  = va `consValSetAbs` (cs `mkConstraint` uncovered usupply ps vsa)
   where cs = [TmConstraint x (valAbsToPmExpr va)]
 
 -- UConCon
@@ -474,7 +513,7 @@ uncovered usupply (cabs@(ConAbs { cabs_con = con, cabs_args = args }) : ps) (Con
     -- Unfold the variable to all possible constructor patterns
     uniqs_cons = listSplitUniqSupply usupply1 `zip` allConstructors con
     cons_cs    = map (uncurry (mkOneConFull x)) uniqs_cons
-    add_one (va,cs) valset = valset `unionValSetAbs` (va `consValSetAbs` (cs `addConstraints` vsa))
+    add_one (va,cs) valset = valset `unionValSetAbs` (va `consValSetAbs` (cs `mkConstraint` vsa))
     inst_vsa   = foldr add_one Empty cons_cs
 
 uncovered _usupply (ConAbs {} : _) Singleton  = panic "uncovered: length mismatch: constructor-sing"
@@ -497,12 +536,12 @@ divergent usupply vec (Union vsa1 vsa2) = divergent usupply1 vec vsa1 `unionValS
   where (usupply1, usupply2) = splitUniqSupply usupply
 
 -- Pure induction (New case because of representation)
-divergent usupply vec (Constraint cs vsa) = cs `addConstraints` divergent usupply vec vsa
+divergent usupply vec (Constraint cs vsa) = cs `mkConstraint` divergent usupply vec vsa
 
 -- DGuard
 divergent usupply (GBindAbs p e : ps) vsa
   | vsa' <- tailValSetAbs $ divergent usupply2 (p++ps) (VarAbs y `consValSetAbs` vsa)
-  = cs `addConstraints` vsa'
+  = cs `mkConstraint` vsa'
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     y  = mkPmId usupply1 anyTy -- CHECKME: Which type to use?
@@ -510,7 +549,7 @@ divergent usupply (GBindAbs p e : ps) vsa
 
 -- DVar
 divergent usupply (VarAbs x : ps) (Cons va vsa)
-  = va `consValSetAbs` (cs `addConstraints` divergent usupply ps vsa)
+  = va `consValSetAbs` (cs `mkConstraint` divergent usupply ps vsa)
   where cs = [TmConstraint x (valAbsToPmExpr va)]
 
 -- DConCon
@@ -522,7 +561,7 @@ divergent usupply (ConAbs { cabs_con = c1, cabs_args = args1 } : ps)
 -- DConVar [NEEDS WORK]
 divergent usupply (cabs@(ConAbs { cabs_con = con, cabs_args = args }) : ps) (Cons (VarAbs x) vsa)
   = Union (Cons (VarAbs x) (Constraint [BtConstraint x] vsa))
-          (divergent usupply2 (cabs : ps) (con_abs `consValSetAbs` (all_cs `addConstraints` vsa)))
+          (divergent usupply2 (cabs : ps) (con_abs `consValSetAbs` (all_cs `mkConstraint` vsa)))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
     (con_abs, all_cs)    = mkOneConFull x usupply1 con -- if cs empty do not do it
@@ -563,17 +602,11 @@ mkOneConFull x usupply con = ...
     (univ_tvs, ex_tvs, eq_spec, thetas, arg_tys, dc_res_ty) = dataConFullSig con
     data_tc = dataConTyCon con   -- The representation TyCon
 
-    mb_tc_args = case splitTyConApp_maybe res_ty of
-                   Nothing -> Nothing
-                   Just (res_tc, res_tc_tys)
-                     | Just (fam_tc, fam_args, _) <- tyConFamInstSig_maybe data_tc
-                     , let fam_tc_tvs = tyConTyVars fam_tc
-                     -> ASSERT( res_tc == fam_tc )
-                        case tcMatchTys (mkVarSet fam_tc_tvs) fam_args res_tc_tys of
-                          Just fam_subst -> Just (map (substTyVar fam_subst) fam_tc_tvs)
-                          Nothing        -> Nothing
-                     | otherwise
-                     -> ASSERT( res_tc == data_tc ) Just res_tc_tys
+    tc_args = case splitTyConApp_mabye res_ty of
+                 Just (tc, tys) -> ASSERT( tc == data_tc ) tys
+                 Nothing -> panic
+
+    
 
     -- ************************************************************************
     (subst, res_eq) = case mb_tc_args of
@@ -594,6 +627,7 @@ mkOneConFull x usupply con = ...
 -- ****************************************************************************
 
 mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
+-- Invariant:  x :: T tys, where T is an algebraic data type
 mkOneConFull x usupply con = (con_abs, all_cs)
   where
     -- Some more uniqSupplies
@@ -626,7 +660,7 @@ tailValSetAbs :: ValSetAbs -> ValSetAbs
 tailValSetAbs Empty               = Empty
 tailValSetAbs Singleton           = panic "tailValSetAbs: Singleton"
 tailValSetAbs (Union vsa1 vsa2)   = tailValSetAbs vsa1 `unionValSetAbs` tailValSetAbs vsa2
-tailValSetAbs (Constraint cs vsa) = cs `addConstraints` tailValSetAbs vsa
+tailValSetAbs (Constraint cs vsa) = cs `mkConstraint` tailValSetAbs vsa
 tailValSetAbs (Cons _ vsa)        = vsa -- actual work
 
 wrapK :: DataCon -> ValSetAbs -> ValSetAbs
@@ -637,7 +671,7 @@ wrapK con = wrapK_aux (dataConSourceArity con) emptylist
     wrapK_aux 0 args vsa                 = mkPmConPat con [] [] [] {- FIXME -} (toList args) `consValSetAbs` vsa
     wrapK_aux _ _    Singleton           = panic "wrapK: Singleton"
     wrapK_aux n args (Cons vs vsa)       = wrapK_aux (n-1) (args `snoc` vs) vsa
-    wrapK_aux n args (Constraint cs vsa) = cs `addConstraints` wrapK_aux n args vsa
+    wrapK_aux n args (Constraint cs vsa) = cs `mkConstraint` wrapK_aux n args vsa
     wrapK_aux n args (Union vsa1 vsa2)   = wrapK_aux n args vsa1 `unionValSetAbs` wrapK_aux n args vsa2
 
 newtype DList a = DL { unDL :: [a] -> [a] }
@@ -658,12 +692,14 @@ snoc xs x = DL (unDL xs . (x:))
 -- ----------------------------------------------------------------------------
 -- | Smart constructors (NB: An empty value set can only be represented as `Empty')
 
-addConstraints :: [PmConstraint] -> ValSetAbs -> ValSetAbs
-addConstraints _cs Empty                = Empty
-addConstraints cs1 (Constraint cs2 vsa) = Constraint (cs1++cs2) vsa -- careful about associativity
-addConstraints cs  other_vsa            = Constraint cs other_vsa
+mkConstraint :: [PmConstraint] -> ValSetAbs -> ValSetAbs
+-- The smart constructor for Constraint (maintains VsaInvariant)
+mkConstraint _cs Empty                = Empty
+mkConstraint cs1 (Constraint cs2 vsa) = Constraint (cs1++cs2) vsa -- careful about associativity
+mkConstraint cs  other_vsa            = Constraint cs other_vsa
 
 unionValSetAbs :: ValSetAbs -> ValSetAbs -> ValSetAbs
+-- The smart constructor for Union (maintains VsaInvariant)
 unionValSetAbs Empty vsa = vsa
 unionValSetAbs vsa Empty = vsa
 unionValSetAbs vsa1 vsa2 = Union vsa1 vsa2
@@ -796,7 +832,7 @@ pruneValSetAbs = pruneValSetAbs' []
     pruneValSetAbs' cs Singleton = do
       mb_sat <- satisfiable cs
       return $ do sat <- mb_sat
-                  return $ if sat then (cs `addConstraints` Singleton) -- always leave them at the end
+                  return $ if sat then (cs `mkConstraint` Singleton) -- always leave them at the end
                                   else Empty
     pruneValSetAbs' cs (Constraint cs' vsa) = pruneValSetAbs' (cs' ++ cs) vsa -- in front for faster concatenation
     pruneValSetAbs' cs (Cons va vsa) = do
