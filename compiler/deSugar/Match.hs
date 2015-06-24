@@ -1000,16 +1000,13 @@ Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.
 dsPmWarn :: DynFlags -> DsMatchContext -> [Type] -> [EquationInfo] -> DsM ()
 dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
   = when (flag_i || flag_u) $ do
-      pm_result <- check tys qs -- checkpm tys qs
-      case pm_result of
-        Nothing -> putSrcSpanDs loc (warnDs (gave_up_warn kind))
-        Just (redundant, inaccessible, uncovered) ->
-          let exists_r = flag_i && notNull redundant
-              exists_i = flag_i && notNull inaccessible
-              exists_u = flag_u && notNull uncovered
-          in  do when exists_r $ putSrcSpanDs loc (warnDs (pprEqns  redundant "are redundant"))
-                 when exists_i $ putSrcSpanDs loc (warnDs (pprEqns  inaccessible "have inaccessible right hand side"))
-                 when exists_u $ putSrcSpanDs loc (warnDs (pprEqnsU uncovered))
+      (redundant, inaccessible, uncovered) <- check tys qs
+      let exists_r = flag_i && notNull redundant
+          exists_i = flag_i && notNull inaccessible
+          exists_u = flag_u && notNull uncovered
+      when exists_r $ putSrcSpanDs loc (warnDs (pprEqns  redundant "are redundant"))
+      when exists_i $ putSrcSpanDs loc (warnDs (pprEqns  inaccessible "have inaccessible right hand side"))
+      when exists_u $ putSrcSpanDs loc (warnDs (pprEqnsU uncovered))
   where
     flag_i = wopt Opt_WarnOverlappingPatterns dflags
     flag_u = exhaustive_flag dflags kind
@@ -1020,11 +1017,6 @@ dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
     pprEqnsU qs = pp_context ctx (ptext (sLit "are non-exhaustive")) $ \_ ->
       hang (ptext (sLit "Patterns not matched:")) 4
            (pprUncovered qs)
-           -- (vcat (map pprUncovered (take maximum_output qs)) $$ dots qs)
-
-    gave_up_warn hs_ctx = vcat [ ptext (sLit "The exhaustiveness/redundancy checker gave up")
-                               , ptext (sLit "In") <+> pprMatchContext hs_ctx
-                               , ptext (sLit "(Perhaps you mixed simple and overloaded syntax?)") ]
 
 dots :: [a] -> SDoc
 dots qs = if qs `lengthExceeds` maximum_output then ptext (sLit "...") else empty

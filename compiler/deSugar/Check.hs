@@ -193,36 +193,27 @@ data PmExpr = PmExprVar   Id
 %************************************************************************
 -}
 
-check :: [Type] -> [EquationInfo] -> DsM (Maybe PmResult)
+check :: [Type] -> [EquationInfo] -> DsM PmResult
 check tys eq_info
-  | null eq_info = return (Just ([],[],[])) -- If we have an empty match, do not reason at all
+  | null eq_info = return ([],[],[]) -- If we have an empty match, do not reason at all
   | otherwise = do
-      usupply <- getUniqueSupplyM
-      mb_res  <- check' eq_info (initial_uncovered usupply tys)
-      return $ mb_res >>= \(rs, is, us) -> return (rs, is, valSetAbsToList us)
+      usupply    <- getUniqueSupplyM
+      (rs,is,us) <- check' eq_info (initial_uncovered usupply tys)
+      return (rs, is, valSetAbsToList us)
 
-check' :: [EquationInfo] -> ValSetAbs -> DsM (Maybe ([EquationInfo], [EquationInfo], ValSetAbs))
+check' :: [EquationInfo] -> ValSetAbs -> DsM ([EquationInfo], [EquationInfo], ValSetAbs)
 check' [] missing = do
   missing' <- pruneValSetAbs missing
-  return $ case missing' of
-    Nothing -> Nothing
-    Just u  -> Just ([], [], u)
+  return ([], [], missing')
 check' (eq:eqs) missing = do
   -- Translate and process current clause
-  translated <- liftUs (translateEqnInfo eq)
-  pm_result  <- patVectProc translated missing
-
-  -- Recursively reason about the rest of the match
-  case pm_result of
-    Nothing -> return Nothing -- Short-circuit (in any case we have no new uncovered to use :P)
-    Just (c,d,us) -> do
-      rec <- check' eqs us
-      return $ do
-        (rs, is, us) <- rec
-        return $ case (c,d) of
-          (True,  _)     -> (   rs,    is, us)
-          (False, True)  -> (   rs, eq:is, us)
-          (False, False) -> (eq:rs,    is, us)
+  translated    <- liftUs (translateEqnInfo eq)
+  (c,  d,  us ) <- patVectProc translated missing
+  (rs, is, us') <- check' eqs us
+  return $ case (c,d) of
+    (True,  _)     -> (   rs,    is, us')
+    (False, True)  -> (   rs, eq:is, us')
+    (False, False) -> (eq:rs,    is, us')
 
 initial_uncovered :: UniqSupply -> [Type] -> ValSetAbs
 initial_uncovered usupply tys = foldr Cons Singleton val_abs_vec
@@ -402,14 +393,14 @@ translateConPatVec c (RecCon (HsRecFields fs _))
 -- ----------------------------------------------------------------------------
 -- | Process a vector
 
-patVectProc :: PatVec -> ValSetAbs -> PmM (Maybe (Bool, Bool, ValSetAbs)) -- Covers? Forces? U(n+1)?
+patVectProc :: PatVec -> ValSetAbs -> PmM (Bool, Bool, ValSetAbs) -- Covers? Forces? U(n+1)?
 patVectProc vec vsa = do
   usC <- getUniqueSupplyM
   usU <- getUniqueSupplyM
   usD <- getUniqueSupplyM
   mb_c <- anySatValSetAbs (covered   usC vec vsa)
   mb_d <- anySatValSetAbs (divergent usD vec vsa)
-  return $ liftM3 (,,) mb_c mb_d (Just $ uncovered usU vec vsa)
+  return (mb_c, mb_d, uncovered usU vec vsa)
 
 -- ----------------------------------------------------------------------------
 -- | Main function 1 (covered)
@@ -824,63 +815,60 @@ splitConstraints (c : rest)
 -}
 
 -- Same interface to check all kinds of different constraints like in the paper
-satisfiable :: [PmConstraint] -> PmM (Maybe Bool)
+satisfiable :: [PmConstraint] -> PmM Bool
 satisfiable constraints = do
   let (ty_cs, tm_cs, bot_cs) = splitConstraints constraints
   -- sat <- tyOracle (listToBag ty_cs)
   sat <- return True -- Leave it like this until you fix type constraint generation
   case sat of
     True -> case tmOracle tm_cs of
-      Left failure -> return $ failure >> return False -- inconsistent term constraints/overloaded syntax
+      Left eq -> pprInTcRnIf (ptext (sLit "this is inconsistent:") <+> ppr eq) >> return False
       Right (residual, (expr_eqs, mapping)) ->
         let answer = isNothing bot_cs || -- just term eqs ==> OK (success)
                      notNull residual || -- something we cannot reason about -- gives inaccessible while it shouldn't
                      notNull expr_eqs || -- something we cannot reason about
                      isForced (fromJust bot_cs) mapping
-        in  return $ Just answer
-    False -> return (Just False) -- inconsistent type constraints
+        in  return answer
+    False -> return False -- inconsistent type constraints
 
 -- | For coverage & laziness
 -- True  => Set may be non-empty
 -- False => Set is definitely empty
 -- Fact:  anySatValSetAbs s = pruneValSetAbs /= Empty
 --        (but we implement it directly for efficiency)
-anySatValSetAbs :: ValSetAbs -> PmM (Maybe Bool) -- TO BOOL
+anySatValSetAbs :: ValSetAbs -> PmM Bool
 anySatValSetAbs = anySatValSetAbs' []
   where
-    anySatValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM (Maybe Bool)
-    anySatValSetAbs' _cs Empty                = return (Just False)
-    anySatValSetAbs'  cs (Union vsa1 vsa2)    = orM (anySatValSetAbs' cs vsa1) (anySatValSetAbs' cs vsa2)
+    anySatValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM Bool
+    anySatValSetAbs' _cs Empty                = return False
+    anySatValSetAbs'  cs (Union vsa1 vsa2)    = anySatValSetAbs' cs vsa1 `orM` anySatValSetAbs' cs vsa2
     anySatValSetAbs'  cs Singleton            = satisfiable cs
     anySatValSetAbs'  cs (Constraint cs' vsa) = anySatValSetAbs' (cs' ++ cs) vsa -- in front for faster concatenation
     anySatValSetAbs'  cs (Cons va vsa)        = anySatValSetAbs' cs vsa
 
     orM m1 m2 = m1 >>= \x ->
-      case x of
-        Nothing    -> return Nothing
-        Just True  -> return (Just True)
-        Just False -> m2
+      if x then return True else m2
 
 -- | For exhaustiveness check
 -- Prune the set by removing unsatisfiable paths
-pruneValSetAbs :: ValSetAbs -> PmM (Maybe ValSetAbs) -- TO BOOL
+pruneValSetAbs :: ValSetAbs -> PmM ValSetAbs
 pruneValSetAbs = pruneValSetAbs' []
   where
-    pruneValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM (Maybe ValSetAbs)
-    pruneValSetAbs' _cs Empty = return (Just Empty)
+    pruneValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM ValSetAbs
+    pruneValSetAbs' _cs Empty = return Empty
     pruneValSetAbs'  cs (Union vsa1 vsa2) = do
       mb_vsa1 <- pruneValSetAbs' cs vsa1
       mb_vsa2 <- pruneValSetAbs' cs vsa2
-      return $ liftM2 mkUnion mb_vsa1 mb_vsa2
+      return $ mkUnion mb_vsa1 mb_vsa2
     pruneValSetAbs' cs Singleton = do
-      mb_sat <- satisfiable cs
-      return $ do sat <- mb_sat
-                  return $ if sat then (cs `mkConstraint` Singleton) -- always leave them at the end
-                                  else Empty
-    pruneValSetAbs' cs (Constraint cs' vsa) = pruneValSetAbs' (cs' ++ cs) vsa -- in front for faster concatenation
+      sat <- satisfiable cs
+      return $ if sat then mkConstraint cs Singleton -- always leave them at the end
+                      else Empty
+    pruneValSetAbs' cs (Constraint cs' vsa)
+      = pruneValSetAbs' (cs' ++ cs) vsa -- in front for faster concatenation
     pruneValSetAbs' cs (Cons va vsa) = do
       mb_vsa <- pruneValSetAbs' cs vsa
-      return $ liftM (mkCons va) mb_vsa
+      return $ mkCons va mb_vsa
 
 {-
 %************************************************************************
@@ -1025,7 +1013,7 @@ type ComplexEq = (PmExpr, PmExpr)
 --     where `from' is the respective overloaded function (fromInteger, etc.)
 --     By default we do not unfold functions (not currently, that it) so the
 --     oracle gives up (See trac #322).
-type Failure = Maybe ComplexEq
+type Failure = ComplexEq
 
 -- | The oracle environment. As the solver processess the constraints, a
 -- substitution theta is generated. Since at every step the algorithm completely
@@ -1034,7 +1022,7 @@ type Failure = Maybe ComplexEq
 -- recursive so there is not termination problem at the moment).
 type PmVarEnv = Map Id PmExpr
 
-type TmOracleEnv = ([SimpleEq], PmVarEnv)
+type TmOracleEnv = ([ComplexEq], PmVarEnv) -- The first is the things we cannos solve (HsExpr, overloading rubbish, etc.)
 
 -- | The oracle monad.
 type TmOracleM a = StateT TmOracleEnv (Except Failure) a -- keep eqs (x~HsExpr) in the environment. We wont do anything with them
@@ -1053,8 +1041,13 @@ liftTmOracleM f = do
   put (other_eqs, env')
   return res
 
-addUnhandledEqs :: [SimpleEq] -> TmOracleM ()
+addUnhandledEqs :: [ComplexEq] -> TmOracleM ()
 addUnhandledEqs eqs = modify (first (eqs++))
+-- (map toComplex eqs++))
+
+-- | Not actually a ComplexEq, we just wrap it with a PmExprVar
+toComplex :: SimpleEq -> ComplexEq
+toComplex = first PmExprVar
 
 -- Extend the substitution
 addSubst :: Id -> PmExpr -> PmVarEnv -> PmVarEnv
@@ -1076,7 +1069,7 @@ partitionSimple in_cs = foldr select ([],[],[]) in_cs
       | otherwise          = (      var_eqs, eq:other_eqs,    res_eqs)
 
 partitionSimpleM :: [SimpleEq] -> TmOracleM ([VarEq], [SimpleEq])
-partitionSimpleM in_cs = addUnhandledEqs res_eqs >> return (var_eqs, other_eqs)
+partitionSimpleM in_cs = addUnhandledEqs (map toComplex res_eqs) >> return (var_eqs, other_eqs)
   where (var_eqs, other_eqs, res_eqs) = partitionSimple in_cs
 
 -- | Split a set of complex equalities into into the 3 categories
@@ -1095,18 +1088,14 @@ partitionComplex in_cs = foldr select ([],[],[],[]) in_cs
       | otherwise          = (      var_eqs, (x,e):simpl_eqs, other_eqs,       res_eqs)
 
 partitionComplexM :: [ComplexEq] -> TmOracleM ([VarEq], [SimpleEq], [ComplexEq])
-partitionComplexM in_cs = addUnhandledEqs res_eqs >> return (var_eqs, simpl_eqs, other_eqs)
+partitionComplexM in_cs = addUnhandledEqs (map toComplex res_eqs) >> return (var_eqs, simpl_eqs, other_eqs)
   where (var_eqs, simpl_eqs, other_eqs, res_eqs) = partitionComplex in_cs
 
 -- ----------------------------------------------------------------------------
 
--- See NOTE [Mixed syntax]
-overloaded_error :: TmOracleM a
-overloaded_error = lift (throwE Nothing)
-
 -- Non-satisfiable set of constraints
 mismatch :: ComplexEq -> TmOracleM a
-mismatch eq = lift (throwE (Just eq))
+mismatch eq = lift (throwE eq)
 
 -- Expressions `True' and `False'
 truePmExpr :: PmExpr
@@ -1267,20 +1256,22 @@ simplifyComplexEq eq =
     (PmExprEq e1 e2, PmExprCon c es) -> handleDeepEq c es e1 e2
 
     -- Overloaded error (Double check. Some of them may need to be panics)
-    (PmExprLit   _, PmExprOLit  _) -> overloaded_error
-    (PmExprLit   _, PmExprNeg   _) -> overloaded_error
-    (PmExprOLit  _, PmExprLit   _) -> overloaded_error
-    (PmExprNeg   _, PmExprLit   _) -> overloaded_error
-    (PmExprCon _ _, PmExprLit   _) -> overloaded_error
-    (PmExprCon _ _, PmExprNeg   _) -> overloaded_error
-    (PmExprCon _ _, PmExprOLit  _) -> overloaded_error
-    (PmExprLit   _, PmExprCon _ _) -> overloaded_error
-    (PmExprNeg   _, PmExprCon _ _) -> overloaded_error
-    (PmExprOLit  _, PmExprCon _ _) -> overloaded_error
+    (PmExprLit   _, PmExprOLit  _) -> overloaded_syntax
+    (PmExprLit   _, PmExprNeg   _) -> overloaded_syntax
+    (PmExprOLit  _, PmExprLit   _) -> overloaded_syntax
+    (PmExprNeg   _, PmExprLit   _) -> overloaded_syntax
+    (PmExprCon _ _, PmExprLit   _) -> overloaded_syntax
+    (PmExprCon _ _, PmExprNeg   _) -> overloaded_syntax
+    (PmExprCon _ _, PmExprOLit  _) -> overloaded_syntax
+    (PmExprLit   _, PmExprCon _ _) -> overloaded_syntax
+    (PmExprNeg   _, PmExprCon _ _) -> overloaded_syntax
+    (PmExprOLit  _, PmExprCon _ _) -> overloaded_syntax
 
     _other_equality -> return (False, [eq]) -- can't simplify :(
 
   where
+    overloaded_syntax = addUnhandledEqs [eq] >> return (True,[])
+
     handleDeepEq :: DataCon -> [PmExpr] -- constructor and arguments
                  -> PmExpr  -> PmExpr   -- the equality
                  -> TmOracleM (Bool, [ComplexEq])
