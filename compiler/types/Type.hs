@@ -122,7 +122,7 @@ module Type (
         -- ** Performing substitution on types and kinds
         substTy, substTys, substTyWith, substTysWith, substTheta,
         substTyVar, substTyVars, substTyVarBndr,
-        cloneTyVarBndr, deShadowTy, lookupTyVar,
+        cloneTyVarBndr, cloneTyVarBndrs, deShadowTy, lookupTyVar,
         substKiWith, substKisWith,
 
         -- * Pretty-printing
@@ -168,6 +168,7 @@ import CoAxiom
 
 -- others
 import Unique           ( Unique, hasKey )
+import UniqSupply       ( UniqSupply, takeUniqFromSupply )
 import BasicTypes       ( Arity, RepArity )
 import Util
 import ListSetOps       ( getNth )
@@ -1641,6 +1642,14 @@ cloneTyVarBndr (TvSubst in_scope tv_env) tv uniq
   where
     tv' = setVarUnique tv uniq  -- Simply set the unique; the kind
                                 -- has no type variables to worry about
+
+cloneTyVarBndrs :: TvSubst -> [TyVar] -> UniqSupply -> (TvSubst, [TyVar])
+cloneTyVarBndrs subst []     _usupply = (subst, [])
+cloneTyVarBndrs subst (t:ts)  usupply = (subst'', tv:tvs)
+  where
+    (uniq, usupply') = takeUniqFromSupply usupply
+    (subst' , tv )   = cloneTyVarBndr subst t uniq
+    (subst'', tvs)   = cloneTyVarBndrs subst' ts usupply'
 
 {-
 ----------------------------------------------------

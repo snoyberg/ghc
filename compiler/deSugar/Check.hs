@@ -36,7 +36,7 @@ import TcType ( mkTcEqPred, toTcType, toTcTypeBag )
 import VarSet
 import Bag
 import ErrUtils
-import TcMType (pureGenInstSkolTyVarsX, genInstSkolTyVarsX)
+import TcMType (genInstSkolTyVarsX)
 import IOEnv (tryM, failM)
 
 import Data.Maybe (isJust)
@@ -631,7 +631,7 @@ mkOneConFull x usupply con = (con_abs, constraints)
     subst1  = zipTopTvSubst univ_tvs tc_args
 
     -- IS THE SECOND PART OF THE TUPLE THE SET OF FRESHENED EXISTENTIALS? MUST BE
-    (subst, ex_tvs') = pureGenInstSkolTyVarsX usupply1 noSrcSpan subst1 ex_tvs
+    (subst, ex_tvs') = cloneTyVarBndrs subst1 ex_tvs usupply1
 
     arguments  = mkConVars usupply2 (substTys subst arg_tys)      -- Constructor arguments (value abstractions)
     theta_cs   = substTheta subst (eqSpecPreds eq_spec ++ thetas) -- All the constraints bound by the constructor
