@@ -829,15 +829,14 @@ satisfiable :: [PmConstraint] -> PmM Bool
 satisfiable constraints = do
   let (ty_cs, tm_cs, bot_cs) = splitConstraints constraints
   sat <- tyOracle (listToBag ty_cs)
-  -- sat <- return True -- Leave it like this until you fix type constraint generation
   case sat of
     True -> case tmOracle tm_cs of
-      Left eq -> pprInTcRnIf (ptext (sLit "this is inconsistent:") <+> ppr eq) >> return False
+      Left eq -> return False
       Right (residual, (expr_eqs, mapping)) ->
         let answer = isNothing bot_cs || -- just term eqs ==> OK (success)
                      notNull residual || -- something we cannot reason about -- gives inaccessible while it shouldn't
                      notNull expr_eqs || -- something we cannot reason about
-                     isForced (fromJust bot_cs) mapping
+                     notForced (fromJust bot_cs) mapping -- Was not evaluated before
         in  return answer
     False -> return False -- inconsistent type constraints
 
@@ -1357,10 +1356,10 @@ getValuePmExpr env (PmExprCon c es) = PmExprCon c (map (getValuePmExpr env) es)
 getValuePmExpr env (PmExprEq e1 e2) = PmExprEq (getValuePmExpr env e1) (getValuePmExpr env e2)
 getValuePmExpr _   other_expr       = other_expr
 
-isForced :: Id -> PmVarEnv -> Bool
-isForced x env = case getValuePmExpr env (PmExprVar x) of
-  PmExprVar _ -> False
-  _other_expr -> True
+notForced :: Id -> PmVarEnv -> Bool
+notForced x env = case getValuePmExpr env (PmExprVar x) of
+  PmExprVar _ -> True
+  _other_expr -> False
 
 -- ----------------------------------------------------------------------------
 
