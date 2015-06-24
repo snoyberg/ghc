@@ -1517,3 +1517,40 @@ To check this match, we should perform arbitrary computations at compile time
 returning a @Nothing@.
 -}
 
+
+{-
+%************************************************************************
+%*                                                                      *
+\subsection{Sanity Checks}
+%*                                                                      *
+%************************************************************************
+-}
+
+type PmArity = Int
+
+patVecArity :: PatVec -> PmArity
+patVecArity = sum . map patternArity
+
+patternArity :: Pattern -> PmArity
+patternArity (GBindAbs {}) = 0
+patternArity (ConAbs   {}) = 1
+patternArity (VarAbs   {}) = 1
+
+-- Should get a default value because an empty set has any arity
+-- (We have no value vector abstractions to see)
+vsaArity :: PmArity -> ValSetAbs -> PmArity
+vsaArity  arity Empty = arity
+vsaArity _arity vsa   = ASSERT (allTheSame arities) (head arities)
+  where arities = vsaArities vsa
+
+vsaArities :: ValSetAbs -> [PmArity] -- Arity for every path. INVARIANT: All the same
+vsaArities Empty              = []
+vsaArities (Union vsa1 vsa2)  = vsaArities vsa1 ++ vsaArities vsa2
+vsaArities Singleton          = [0]
+vsaArities (Constraint _ vsa) = vsaArities vsa
+vsaArities (Cons _ vsa)       = [1 + arity | arity <- vsaArities vsa]
+
+allTheSame :: Eq a => [a] -> Bool
+allTheSame []     = True
+allTheSame (x:xs) = all (==x) xs
+
