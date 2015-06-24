@@ -18,6 +18,7 @@ module UniqSupply (
 
         -- * Unique supply monad and its abstraction
         UniqSM, MonadUnique(..),
+        liftUs,
 
         -- ** Operations on the monad
         initUs, initUs_,
@@ -179,6 +180,9 @@ instance MonadUnique UniqSM where
     getUniqueSupplyM = getUs
     getUniqueM  = getUniqueUs
     getUniquesM = getUniquesUs
+
+liftUs :: MonadUnique m => UniqSM a -> m a
+liftUs m = getUniqueSupplyM >>= return . flip initUs_ m
 
 getUniqueUs :: UniqSM Unique
 getUniqueUs = USM (\us -> case takeUniqFromSupply us of

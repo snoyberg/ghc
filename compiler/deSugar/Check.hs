@@ -201,8 +201,6 @@ check tys eq_info
       mb_res  <- check' eq_info (initial_uncovered usupply tys)
       return $ mb_res >>= \(rs, is, us) -> return (rs, is, valSetAbsToList us)
 
-liftUs :: UniqSM a -> DsM a
-
 check' :: [EquationInfo] -> ValSetAbs -> DsM (Maybe ([EquationInfo], [EquationInfo], ValSetAbs))
 check' [] missing = do
   missing' <- pruneValSetAbs missing
@@ -211,8 +209,8 @@ check' [] missing = do
     Just u  -> Just ([], [], u)
 check' (eq:eqs) missing = do
   -- Translate and process current clause
-  translated <- liftUs translateEqnInfo eq
-  pm_result <- patVectProc translated missing
+  translated <- liftUs (translateEqnInfo eq)
+  pm_result  <- patVectProc translated missing
 
   -- Recursively reason about the rest of the match
   case pm_result of
@@ -373,7 +371,7 @@ translatePatVec pats = mapM translatePat pats
 -- Temporary function (drops the guard (MR at the moment))
 translateEqnInfo :: EquationInfo -> UniqSM PatVec
 translateEqnInfo (EqnInfo { eqn_pats = ps })
-  = translatePatVec ps
+  = concat <$> translatePatVec ps
 -- -----------------------------------------------------------------------
 
 translateConPatVec :: DataCon -> HsConPatDetails Id -> UniqSM PatVec
@@ -438,10 +436,10 @@ covered :: UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
 --      Constraint cs vsa -> mkConstraint cs (traverse f us vsa)
 --      Cons va vsa       -> traverseCons f us pv va vsa
 
-traverse2 f us (p gs : pv) va vsa = ....
-
-traverse2 f us (x    : pv) va vsa = ....
-traverse2 f us (p gd : pv) va vsa = ....
+-- traverse2 f us (p gs : pv) va vsa = ....
+-- 
+-- traverse2 f us (x    : pv) va vsa = ....
+-- traverse2 f us (p gd : pv) va vsa = ....
 
 -- 
 -- 
@@ -847,7 +845,7 @@ satisfiable constraints = do
 -- False => Set is definitely empty
 -- Fact:  anySatValSetAbs s = pruneValSetAbs /= Empty
 --        (but we implement it directly for efficiency)
-anySatValSetAbs :: ValSetAbs -> PmM Bool
+anySatValSetAbs :: ValSetAbs -> PmM (Maybe Bool) -- TO BOOL
 anySatValSetAbs = anySatValSetAbs' []
   where
     anySatValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM (Maybe Bool)
@@ -865,7 +863,7 @@ anySatValSetAbs = anySatValSetAbs' []
 
 -- | For exhaustiveness check
 -- Prune the set by removing unsatisfiable paths
-pruneValSetAbs :: ValSetAbs -> PmM ValSetAbs
+pruneValSetAbs :: ValSetAbs -> PmM (Maybe ValSetAbs) -- TO BOOL
 pruneValSetAbs = pruneValSetAbs' []
   where
     pruneValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM (Maybe ValSetAbs)
