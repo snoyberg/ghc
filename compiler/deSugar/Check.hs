@@ -97,14 +97,28 @@ type Pattern = PmPat 'P -- Pattern
 type PatVec   = [Pattern] -- Just a type synonym for pattern vectors ps
 type ValueVec = [ValAbs]  -- Just a type synonym for velue   vectors as
 
--- The differnence between patterns (PmPat 'P)
+-- The difference between patterns (PmPat 'P)
 -- and value abstractios (PmPat 'V)
 -- is that the patterns can contain guards (GBindAbs)
 -- and value abstractions cannot.  Enforced with a GADT.
 
+-- The *arity* of a PatVec [p1,..,pn] is
+-- the number of p1..pn that are not Guards
+
+{-  ???
+data PmPat p = ConAbs { cabs_args :: [p] }
+             | VarAbs
+
+data PmGPat = Guard PatVec Expr
+            | NonGuard (PmPat PmGPat)   -- Patterns
+
+newtype ValAbs = VA (PmPat ValAbs)
+-}
+
+
 data PmPat :: Abstraction -> * where
   -- Guard: P <- e (strict by default) Instead of a single P use a list [AsPat]
-  GBindAbs { gabs_pats :: [PmPat 'P]
+  GBindAbs { gabs_pats :: PatVec   -- Of arity 1
            , gabs_expr :: PmExpr } :: PmPat 'P
 
   -- Constructor: K ps
@@ -128,11 +142,11 @@ data PmPat :: Abstraction -> * where
 
 {- pats ::= pat1 .. patn
    pat ::= K ex_tvs ev_vars pats arg_tys     -- K is from data type T
-                              -- Pattern has type T ty1 .. tyn
-         | var guards
-   guards ::= guard1 ... guardn
-   guard ::= e -> pat
-   arg_ts ::= ty1 .. tyn
+                                             -- Pattern has type T ty1 .. tyn
+         | var
+         | pats <- expr       -- Arity(pats) = 1
+
+   arg_tys ::= ty1 .. tyn
 -}
 
 
@@ -141,6 +155,8 @@ data ValSetAbs   -- Reprsents a set of value vector abstractions
                  -- where 'us'    is a ValueVec
                  --       'Delta' is a constraint
   -- INVARIANT VsaInvariant: an empty ValSetAbs is always represented by Empty
+  -- INVARIANT VsaArity: the number of Cons's in any path to a leaf is the same
+  -- The *arity* of a ValSetAbs is the number of Cons's in any path to a leaf
   = Empty                               -- {}
   | Union ValSetAbs ValSetAbs           -- S1 u S2
   | Singleton                           -- { |- empty |> empty }
@@ -185,6 +201,8 @@ check tys eq_info
       mb_res  <- check' eq_info (initial_uncovered usupply tys)
       return $ mb_res >>= \(rs, is, us) -> return (rs, is, valSetAbsToList us)
 
+liftUs :: UniqSM a -> DsM a
+
 check' :: [EquationInfo] -> ValSetAbs -> DsM (Maybe ([EquationInfo], [EquationInfo], ValSetAbs))
 check' [] missing = do
   missing' <- pruneValSetAbs missing
@@ -193,8 +211,7 @@ check' [] missing = do
     Just u  -> Just ([], [], u)
 check' (eq:eqs) missing = do
   -- Translate and process current clause
-  usupply <- getUniqueSupplyM
-  let translated = translateEqnInfo usupply eq
+  translated <- liftUs translateEqnInfo eq
   pm_result <- patVectProc translated missing
 
   -- Recursively reason about the rest of the match
@@ -212,8 +229,8 @@ check' (eq:eqs) missing = do
 initial_uncovered :: UniqSupply -> [Type] -> ValSetAbs
 initial_uncovered usupply tys = foldr Cons Singleton val_abs_vec
   where
-    uniqs_tys   = listSplitUniqSupply usupply `zip` tys
-    val_abs_vec = map (uncurry mkPmVar) uniqs_tys
+    uniqs       = listSplitUniqSupply usupply
+    val_abs_vec = zipWith mkPmVar uniqs tys
 
 {-
 %************************************************************************
@@ -354,9 +371,9 @@ translatePatVec pats = mapM translatePat pats
 
 -- -----------------------------------------------------------------------
 -- Temporary function (drops the guard (MR at the moment))
-translateEqnInfo :: UniqSupply -> EquationInfo -> PatVec
-translateEqnInfo usupply (EqnInfo { eqn_pats = ps })
-  = concat $ initUs_ usupply (translatePatVec ps)
+translateEqnInfo :: EquationInfo -> UniqSM PatVec
+translateEqnInfo (EqnInfo { eqn_pats = ps })
+  = translatePatVec ps
 -- -----------------------------------------------------------------------
 
 translateConPatVec :: DataCon -> HsConPatDetails Id -> UniqSM PatVec
@@ -404,17 +421,28 @@ covered :: UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
 -- | TODO: After you change the representation of patterns
 -- traverse :: WhatToTo -> UniqSupply -> ValSetAbs -> ValSetAbs
 -- 
--- data WhatToTo = WTD { wtd_empty :: Delta -> ValSetAbs
+-- data WhatToTo = WTD { wtd_empty :: Bool      -- True <=> return Singleton
+--                                              -- False <=> return Empty
 --                     , wtd_mismatch :: Bool   -- True  <=> return argument VSA
 --                                              -- False <=> return Empty
 --                     , wtd_cons :: PatVec -> ValAbs -> ValSetAbs -> ValSetAbs }
--- traverse f us vsa
+-- traverse f us [] vsa  = ...
+-- traverse f us (Guard .. : ps) vsa = ..
+-- traverse f us (non-gd : ps) vsa = traverse_non_gd f us non_gd ps vs
+
+
 --   = case vsa of
 --      Empty             -> Empty
 --      Singleton         -> ASSERT( null pv ) Singleton
 --      Union vsa1 vsa2   -> Union (traverse f us1 vsa1) (traverse f us2 vsa2)
 --      Constraint cs vsa -> mkConstraint cs (traverse f us vsa)
---      Cons va vsa       -> f us pv va vsa
+--      Cons va vsa       -> traverseCons f us pv va vsa
+
+traverse2 f us (p gs : pv) va vsa = ....
+
+traverse2 f us (x    : pv) va vsa = ....
+traverse2 f us (p gd : pv) va vsa = ....
+
 -- 
 -- 
 -- covered pv us vsa = traverse (coveredCons pv) us vsa
@@ -574,6 +602,21 @@ divergent _usupply []               (Cons _ _) = panic "divergent: length mismat
 -- | Basic utilities
 
 mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
+--  *  x :: T tys, where T is an algebraic data type
+--     NB: in the case of a data familiy, T is the *representation* TyCon
+--     e.g.   data instance T (a,b) = T1 a b
+--       leads to
+--            data TPair a b = T1 a b  -- The "representation" type
+--       It is TPair, not T, that is given to mkOneConFull
+--
+--  * 'con' K is a constructor of data type T
+--
+-- After instantiating the universal tyvars of K we get
+--          K tys :: forall bs. Q => s1 .. sn -> T tys
+--
+-- Results: ValAbs:          K (y1::s1) .. (yn::sn)
+--          [PmConstraint]:  Q, x ~ K y1..yn
+
 mkOneConFull x usupply con = (con_abs, constraints)
   where
 
@@ -590,15 +633,15 @@ mkOneConFull x usupply con = (con_abs, constraints)
     subst1  = zipTopTvSubst univ_tvs tc_args
 
     -- IS THE SECOND PART OF THE TUPLE THE SET OF FRESHENED EXISTENTIALS? MUST BE
-    (subst, tvs) = pureGenInstSkolTyVarsX usupply1 noSrcSpan subst1 ex_tvs
+    (subst, ex_tvs') = pureGenInstSkolTyVarsX usupply1 noSrcSpan subst1 ex_tvs
 
     arguments  = mkConVars usupply2 (substTys subst arg_tys)      -- Constructor arguments (value abstractions)
     theta_cs   = substTheta subst (eqSpecPreds eq_spec ++ thetas) -- All the constraints bound by the constructor
 
-    evvars = map (uncurry (nameType "oneCon")) $ zip (listSplitUniqSupply usupply3) theta_cs
+    evvars = zipWith (nameType "oneCon") (listSplitUniqSupply usupply3) theta_cs
     con_abs    = ConAbs { cabs_con     = con
                         , cabs_arg_tys = tc_args
-                        , cabs_tvs     = tvs
+                        , cabs_tvs     = ex_tvs'
                         , cabs_dicts   = evvars
                         , cabs_args    = arguments }
 
@@ -800,7 +843,11 @@ satisfiable constraints = do
     False -> return (Just False) -- inconsistent type constraints
 
 -- | For coverage & laziness
-anySatValSetAbs :: ValSetAbs -> PmM (Maybe Bool)
+-- True  => Set may be non-empty
+-- False => Set is definitely empty
+-- Fact:  anySatValSetAbs s = pruneValSetAbs /= Empty
+--        (but we implement it directly for efficiency)
+anySatValSetAbs :: ValSetAbs -> PmM Bool
 anySatValSetAbs = anySatValSetAbs' []
   where
     anySatValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM (Maybe Bool)
@@ -817,7 +864,8 @@ anySatValSetAbs = anySatValSetAbs' []
         Just False -> m2
 
 -- | For exhaustiveness check
-pruneValSetAbs :: ValSetAbs -> PmM (Maybe ValSetAbs)
+-- Prune the set by removing unsatisfiable paths
+pruneValSetAbs :: ValSetAbs -> PmM ValSetAbs
 pruneValSetAbs = pruneValSetAbs' []
   where
     pruneValSetAbs' :: [PmConstraint] -> ValSetAbs -> PmM (Maybe ValSetAbs)
