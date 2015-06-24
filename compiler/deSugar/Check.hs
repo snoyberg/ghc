@@ -39,6 +39,7 @@ import ErrUtils
 import TcMType (genInstSkolTyVarsX)
 import IOEnv (tryM, failM)
 
+import Data.List (find)
 import Data.Maybe (isJust)
 import Control.Monad ( when, forM, zipWithM, liftM, liftM2, liftM3 )
 
@@ -47,7 +48,6 @@ import Var (EvVar)
 import Type
 
 import TcRnTypes  ( pprInTcRnIf ) -- Shouldn't be here
-import TysPrim    ( anyTy )       -- Shouldn't be here
 import UniqSupply -- ( UniqSupply
                   -- , splitUniqSupply      -- :: UniqSupply -> (UniqSupply, UniqSupply)
                   -- , listSplitUniqSupply  -- :: UniqSupply -> [UniqSupply]
@@ -449,16 +449,16 @@ covered usupply vec (Union vsa1 vsa2)
   where (usupply1, usupply2) = splitUniqSupply usupply
 
 -- Pure induction (New case because of representation)
-covered usupply vec (Constraint cs vsa) 
+covered usupply vec (Constraint cs vsa)
   = cs `mkConstraint` covered usupply vec vsa
 
 -- CGuard
-covered usupply (GBindAbs p e : ps) vsa
+covered usupply (pat@(GBindAbs p e) : ps) vsa
   | vsa' <- tailValSetAbs $ covered usupply2 (p++ps) (VarAbs y `mkCons` vsa)
   = cs `mkConstraint` vsa'
   where
     (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 anyTy -- CHECKME: Which type to use?
+    y  = mkPmId usupply1 (pmPatType pat)
     cs = [TmConstraint y e]
 
 -- CVar
@@ -502,11 +502,11 @@ uncovered usupply vec (Union vsa1 vsa2) = uncovered usupply1 vec vsa1 `mkUnion` 
 uncovered usupply vec (Constraint cs vsa) = cs `mkConstraint` uncovered usupply vec vsa
 
 -- UGuard
-uncovered usupply (GBindAbs p e : ps) vsa
+uncovered usupply (pat@(GBindAbs p e) : ps) vsa
   = cs `mkConstraint` (tailValSetAbs $ uncovered usupply2 (p++ps) (VarAbs y `mkCons` vsa))
   where
     (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 anyTy -- CHECKME: Which type to use?
+    y  = mkPmId usupply1 (pmPatType pat)
     cs = [TmConstraint y e]
 
 -- UVar
@@ -556,12 +556,12 @@ divergent usupply vec (Union vsa1 vsa2) = divergent usupply1 vec vsa1 `mkUnion` 
 divergent usupply vec (Constraint cs vsa) = cs `mkConstraint` divergent usupply vec vsa
 
 -- DGuard
-divergent usupply (GBindAbs p e : ps) vsa
+divergent usupply (pat@(GBindAbs p e) : ps) vsa
   | vsa' <- tailValSetAbs $ divergent usupply2 (p++ps) (VarAbs y `mkCons` vsa)
   = cs `mkConstraint` vsa'
   where
     (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 anyTy -- CHECKME: Which type to use?
+    y  = mkPmId usupply1 (pmPatType pat)
     cs = [TmConstraint y e]
 
 -- DVar
@@ -589,6 +589,16 @@ divergent _usupply []               (Cons _ _) = panic "divergent: length mismat
 
 -- ----------------------------------------------------------------------------
 -- | Basic utilities
+
+-- | Get the type out of a PmPat. For guard patterns (ps <- e) we use the type
+-- of the first (or the single -WHEREVER IT IS- valid to use?) pattern
+pmPatType :: PmPat abs -> Type
+pmPatType (GBindAbs { gabs_pats = pats })
+  = ASSERT (patVecArity pats == 1) (pmPatType p)
+  where Just p = find ((==1) . patternArity) pats
+pmPatType (ConAbs { cabs_con = con, cabs_arg_tys = tys })
+  = mkTyConApp (dataConTyCon con) tys
+pmPatType (VarAbs { vabs_id = x }) = idType x
 
 mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
 --  *  x :: T tys, where T is an algebraic data type
@@ -818,8 +828,8 @@ splitConstraints (c : rest)
 satisfiable :: [PmConstraint] -> PmM Bool
 satisfiable constraints = do
   let (ty_cs, tm_cs, bot_cs) = splitConstraints constraints
-  -- sat <- tyOracle (listToBag ty_cs)
-  sat <- return True -- Leave it like this until you fix type constraint generation
+  sat <- tyOracle (listToBag ty_cs)
+  -- sat <- return True -- Leave it like this until you fix type constraint generation
   case sat of
     True -> case tmOracle tm_cs of
       Left eq -> pprInTcRnIf (ptext (sLit "this is inconsistent:") <+> ppr eq) >> return False
