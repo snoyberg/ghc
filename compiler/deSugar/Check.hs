@@ -259,10 +259,11 @@ falsePmPat = nullaryPmConPat falseDataCon
 nilPmPat :: Type -> PmPat abs
 nilPmPat ty = mkPmConPat nilDataCon [ty] [] [] []
 
-mkListPmPat :: Type -> [PmPat abs] -> [PmPat abs] -> PmPat abs
-mkListPmPat ty xs ys = ConAbs { cabs_con = consDataCon, cabs_arg_tys = [ty]
+-- The result wont be a list after the change
+mkListPmPat :: Type -> [PmPat abs] -> [PmPat abs] -> [PmPat abs]
+mkListPmPat ty xs ys = [ConAbs { cabs_con = consDataCon, cabs_arg_tys = [ty]
                                , cabs_tvs = [], cabs_dicts = []
-                               , cabs_args = xs++ys }
+                               , cabs_args = xs++ys }]
 
 mkPmConPat :: DataCon -> [Type] -> [TyVar] -> [EvVar] -> [PmPat abs] -> PmPat abs
 mkPmConPat con arg_tys ex_tvs dicts args
@@ -417,75 +418,84 @@ patVectProc vec vsa = do
   return (mb_c, mb_d, uncovered usU vec vsa)
 
 --- ----------------------------------------------------------------------------
-data WhatToTo = WTD { wtd_empty    :: ValSetAbs              -- What to return at the end of the vector
+data WhatToDo = WTD { wtd_empty    :: ValSetAbs              -- What to return at the end of the vector
                     , wtd_mismatch :: ValSetAbs -> ValSetAbs -- ConCon case: what if there is a mismatch?
-                    , wtd_cons     :: UniqSupply -> PatVec -> ValAbs -> ValSetAbs -> ValSetAbs } -- FOR NOW
+                    , wtd_cons     :: UniqSupply
+                                   -> Pattern -> DataCon -> PatVec
+                                   -> Id -> ValSetAbs -> ValSetAbs }
 
+wtdC, wtdU, wtdD :: WhatToDo
+wtdC = WTD { wtd_empty = Singleton, wtd_mismatch = const Empty, wtd_cons = consC wtdC }
+wtdU = WTD { wtd_empty = Empty,     wtd_mismatch = id,          wtd_cons = consU wtdU }
+wtdD = WTD { wtd_empty = Empty,     wtd_mismatch = const Empty, wtd_cons = consD wtdD }
 
-traverse :: WhatToTo -> UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
+traverse_vsa :: WhatToDo -> UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
+traverse_vsa wtd us []                  vsa = ASSERT( vsaArity 0 vsa == 0 ) vsa
+traverse_vsa wtd us (GBindAbs p e : ps) vsa = traverse_guard wtd us p e ps vsa
+traverse_vsa wtd us (non_gd : ps)       vsa = traverse_non_gd wtd us non_gd ps vsa
 
--- | Empty pattern vector
--- Traverse the rest of the Value Set Abstraction
--- to make sure that it is a Singleton
-traverse wtd us [] vsa = ASSERT( vsaArity vsa == 0 ) vsa
-
--- | The Pattern Vector starts with a guard
--- Highest priority (Do not even inspect the Value Set Abstraction)
-traverse wtd us (pat@(GBindAbs p e) : ps) vsa
-  = cs `mkConstraint` (tailValSetAbs $ traverse wtd usupply2 (p++ps) (VarAbs y `mkCons` vsa))
-  where
-    (usupply1, usupply2) = splitUniqSupply usupply
-    y  = mkPmId usupply1 (pmPatType pat)
-    cs = [TmConstraint y e]
-
--- | The Pattern Vector starts with a Variable/Constructor pattern
--- Go deeper in the Value Set Abstraction until you meet a cons
-traverse wtd us (non_gd : ps) vsa = traverse_non_gd wtd us non_gd ps vs
-
-
-traverse_non_gd :: WhatToTo -> UniqSupply -> Pattern -> PatVec -> ValSetAbs -> ValSetAbs
+traverse_non_gd :: WhatToDo -> UniqSupply -> Pattern -> PatVec -> ValSetAbs -> ValSetAbs
 traverse_non_gd wtd us non_gd ps vsa =
   case vsa of
     Empty             -> Empty
     Singleton         -> wtd_empty wtd
     Union vsa1 vsa2   -> let (us1, us2) = splitUniqSupply us
-                         in  mkUnion (traverse_non_gd wtd us1 non_gd vsa)
-                                     (traverse_non_gd wtd us2 non_gd vsa)
-    Constraint cs vsa -> mkConstraint cs (traverse_non_gd wtd us non_gd vsa)
-    Cons vs vsa       -> traverseCons wtd us non_gd ps va vsa
+                         in  mkUnion (traverse_non_gd wtd us1 non_gd ps vsa1)
+                                     (traverse_non_gd wtd us2 non_gd ps vsa2)
+    Constraint cs vsa -> mkConstraint cs (traverse_non_gd wtd us non_gd ps vsa)
+    Cons va vsa       -> traverse_cons wtd us non_gd ps va vsa
 
-traverseCons :: WhatToTo -> UniqSupply
-             -> Pattern  -> PatternVec
-             -> ValAbs   -> ValSetAbs
-             -> ValSetAbs
-traverseCons wtd us p ps va vsa
-  =
---   = case vsa of
---       Empty             -> -- Empty
---       Singleton         -> -- ASSERT( null pv ) Singleton
---       Union vsa1 vsa2   -> -- Union (traverse f us1 vsa1) (traverse f us2 vsa2)
---       Constraint cs vsa -> -- mkConstraint cs (traverse f us vsa)
---       Cons va vsa       -> -- traverseCons f us pv va vsa
+traverse_guard :: WhatToDo -> UniqSupply
+               -> PatVec -> PmExpr -- ps <- e
+               -> PatVec -> ValSetAbs -> ValSetAbs
+traverse_guard wtd us p e ps vsa
+  = mkConstraint [TmConstraint y e] . tailValSetAbs
+  $ traverse_vsa wtd us2 (p++ps) (VarAbs y `mkCons` vsa)
+  where
+    (us1, us2) = splitUniqSupply us
+    y  = mkPmId us1 (pmPatType (GBindAbs p e))
 
-wtdCovered :: WhatToDo
-wtdCovered = WTD { wtd_empty    = Singleton
-                 , wtd_mismatch = const Empty
-                 , wtd_cons     = undefined {- ??? -} }
-wtdUncovered :: WhatToDo
-wtdUncovered = WTD { wtd_empty    = Empty
-                   , wtd_mismatch = id
-                   , wtd_cons     = undefined {- ??? -} }
-wtdDivergent :: WhatToDo
-wtdDivergent = WTD { wtd_empty    = Empty
-                   , wtd_mismatch = const Empty
-                   , wtd_cons     = undefined {- ??? -} }
+traverse_cons :: WhatToDo -> UniqSupply
+              -> Pattern  -> PatVec
+              -> ValAbs   -> ValSetAbs
+              -> ValSetAbs
+traverse_cons wtd us p ps va vsa
+  = case p of
+      VarAbs x -> mkCons va $ mkConstraint [TmConstraint x (valAbsToPmExpr va)]
+                            $ traverse_vsa wtd us ps vsa
+      ConAbs { cabs_con = c1, cabs_args = args1 } -> case va of
+        ConAbs { cabs_con = c2, cabs_args = args2 }
+          | c1 /= c2  -> wtd_mismatch wtd (mkCons va vsa)
+          | otherwise -> wrapK c1 $ traverse_vsa wtd us (args1 ++ ps) (foldr mkCons vsa args2)
+        VarAbs x -> (wtd_cons wtd) us p c1 ps x vsa
+      GBindAbs {} -> panic "traverse_cons: guard"
 
--- traverse2 f us (p gs : pv) va vsa = ....
--- 
--- traverse2 f us (x    : pv) va vsa = ....
--- traverse2 f us (p gd : pv) va vsa = ....
--- 
--- covered pv us vsa = traverse (coveredCons pv) us vsa
+consC :: WhatToDo -> UniqSupply -> Pattern -> DataCon -> PatVec -> Id -> ValSetAbs -> ValSetAbs
+consC wtd us cabs con ps x vsa
+  = traverse_cons wtd us2 cabs ps con_abs (mkConstraint all_cs vsa)
+  where
+    (us1, us2)        = splitUniqSupply us
+    (con_abs, all_cs) = mkOneConFull x us1 con
+
+consU :: WhatToDo -> UniqSupply -> Pattern -> DataCon -> PatVec -> Id -> ValSetAbs -> ValSetAbs
+consU wtd us cabs con ps x vsa
+  = traverse_non_gd wtd us2 cabs ps inst_vsa
+  where
+    (us1, us2) = splitUniqSupply us
+    cons_cs    = zipWith (mkOneConFull x) (listSplitUniqSupply us1) (allConstructors con)
+    add_one (va,cs) valset = mkUnion valset $ mkCons va $ mkConstraint cs vsa
+    inst_vsa   = foldr add_one Empty cons_cs
+
+consD :: WhatToDo -> UniqSupply -> Pattern -> DataCon -> PatVec -> Id -> ValSetAbs -> ValSetAbs
+consD wtd us cabs con ps x vsa
+  = mkUnion (mkCons (VarAbs x) (mkConstraint [BtConstraint x] vsa))
+            (traverse_cons wtd us2 cabs ps con_abs (mkConstraint all_cs vsa))
+  where
+    (us1, us2)        = splitUniqSupply us
+    (con_abs, all_cs) = mkOneConFull x us1 con
+
+-- ----------------------------------------------------------------------------
+-- ----------------------------------------------------------------------------
 
 --- ----------------------------------------------------------------------------
 -- | Main function 1 (covered)
