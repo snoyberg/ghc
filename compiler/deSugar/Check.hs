@@ -378,6 +378,35 @@ translatePatVec pats = mapM translatePat pats
 translateEqnInfo :: EquationInfo -> UniqSM PatVec
 translateEqnInfo (EqnInfo { eqn_pats = ps })
   = concat <$> translatePatVec ps
+
+-- A. What to do with lets?
+-- B. write a function hsExprToPmExpr for better results? (it's a yes)
+translateGuards :: [GuardStmt Id] -> UniqSM PatVec
+translateGuards guards = concat <$> mapM translateGuard guards
+
+translateGuard :: GuardStmt Id -> UniqSM PatVec
+translateGuard (BodyStmt e _ _ _)
+  | Just _ <- isTrueLHsExpr e = return []
+  | otherwise = let e' = lhsExprToPmExpr e
+                    ps = [truePmPat]
+                in  return [GBindAbs ps e']
+translateGuard (LetStmt binds)
+  = undefined {- WHAT TO DO WITH THIS THEN? WE CARE OR NOT? -}
+translateGuard (BindStmt p e _ _)
+  = do pats <- translatePat (unLoc p)
+       let e' = lhsExprToPmExpr e
+       return [GBindAbs pats e']
+translateGuard (LastStmt  {}) = panic "translateGuard LastStmt"
+translateGuard (ParStmt   {}) = panic "translateGuard ParStmt"
+translateGuard (TransStmt {}) = panic "translateGuard TransStmt"
+translateGuard (RecStmt   {}) = panic "translateGuard RecStmt"
+
+hsExprToPmExpr :: HsExpr Id -> PmExpr
+hsExprToPmExpr = PmExprOther -- FOR NOW
+
+lhsExprToPmExpr :: LHsExpr Id -> PmExpr
+lhsExprToPmExpr (L _ e) = hsExprToPmExpr e
+
 -- -----------------------------------------------------------------------
 
 translateConPatVec :: DataCon -> HsConPatDetails Id -> UniqSM PatVec
