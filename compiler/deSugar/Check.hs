@@ -94,6 +94,20 @@ data Abstraction = P | V   -- Used to parameterise PmPat
 type ValAbs  = PmPat 'V -- Value Abstraction
 type Pattern = PmPat 'P -- Pattern
 
+{-
+data PatVec = PVNil
+            | GuardCons Guard          PatVec
+            | PatCons   (PmPat PatVec) PatVec
+
+data ValueVec = VNil
+              | VCons (PmPat ValueVec) ValueVec
+
+data PmPat rec_pats
+  = ConAbs { ...
+           , cabs_args :: rec_pats }
+  | VarAbs Id
+-}
+
 type PatVec   = [Pattern] -- Just a type synonym for pattern vectors ps
 type ValueVec = [ValAbs]  -- Just a type synonym for velue   vectors as
 
@@ -245,10 +259,10 @@ falsePmPat = nullaryPmConPat falseDataCon
 nilPmPat :: Type -> PmPat abs
 nilPmPat ty = mkPmConPat nilDataCon [ty] [] [] []
 
-mkListPmPat :: Type -> [PmPat abs] -> [PmPat abs] -> [PmPat abs]
-mkListPmPat ty xs ys = [ConAbs { cabs_con = consDataCon, cabs_arg_tys = [ty]
+mkListPmPat :: Type -> [PmPat abs] -> [PmPat abs] -> PmPat abs
+mkListPmPat ty xs ys = ConAbs { cabs_con = consDataCon, cabs_arg_tys = [ty]
                                , cabs_tvs = [], cabs_dicts = []
-                               , cabs_args = xs++ys }]
+                               , cabs_args = xs++ys }
 
 mkPmConPat :: DataCon -> [Type] -> [TyVar] -> [EvVar] -> [PmPat abs] -> PmPat abs
 mkPmConPat con arg_tys ex_tvs dicts args
@@ -413,7 +427,7 @@ traverse :: WhatToTo -> UniqSupply -> PatVec -> ValSetAbs -> ValSetAbs
 -- | Empty pattern vector
 -- Traverse the rest of the Value Set Abstraction
 -- to make sure that it is a Singleton
-traverse wtd us [] vsa = traverse_non_gd wtd us Nothing vsa
+traverse wtd us [] vsa = ASSERT( vsaArity vsa == 0 ) vsa
 
 -- | The Pattern Vector starts with a guard
 -- Highest priority (Do not even inspect the Value Set Abstraction)
@@ -426,21 +440,19 @@ traverse wtd us (pat@(GBindAbs p e) : ps) vsa
 
 -- | The Pattern Vector starts with a Variable/Constructor pattern
 -- Go deeper in the Value Set Abstraction until you meet a cons
-traverse wtd us (non_gd : ps) vsa = traverse_non_gd wtd us (Just (non_gd,ps)) vs
+traverse wtd us (non_gd : ps) vsa = traverse_non_gd wtd us non_gd ps vs
 
 
-traverse_non_gd :: WhatToTo -> UniqSupply -> Maybe (Pattern, PatVec) -> ValSetAbs -> ValSetAbs
-traverse_non_gd wtd us non_gd vsa =
+traverse_non_gd :: WhatToTo -> UniqSupply -> Pattern -> PatVec -> ValSetAbs -> ValSetAbs
+traverse_non_gd wtd us non_gd ps vsa =
   case vsa of
     Empty             -> Empty
-    Singleton         -> ASSERT (isNothing non_gd) (wtd_empty wtd)
+    Singleton         -> wtd_empty wtd
     Union vsa1 vsa2   -> let (us1, us2) = splitUniqSupply us
                          in  mkUnion (traverse_non_gd wtd us1 non_gd vsa)
                                      (traverse_non_gd wtd us2 non_gd vsa)
     Constraint cs vsa -> mkConstraint cs (traverse_non_gd wtd us non_gd vsa)
-    Cons vs vsa       -> ASSERT (isJust non_gd) $
-                         let (p:ps) = fromJust non_gd
-                         in  traverseCons wtd us p ps va vsa
+    Cons vs vsa       -> traverseCons wtd us non_gd ps va vsa
 
 traverseCons :: WhatToTo -> UniqSupply
              -> Pattern  -> PatternVec
