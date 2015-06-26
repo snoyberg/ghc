@@ -405,21 +405,33 @@ translateGuards :: [GuardStmt Id] -> UniqSM PatVec
 translateGuards guards = concat <$> mapM translateGuard guards
 
 translateGuard :: GuardStmt Id -> UniqSM PatVec
-translateGuard (BodyStmt e _ _ _)
+translateGuard (BodyStmt e _ _ _) = translateBoolGuard e
+translateGuard (LetStmt    binds) = translateLet binds
+translateGuard (BindStmt p e _ _) = translateBind p e
+translateGuard (LastStmt      {}) = panic "translateGuard LastStmt"
+translateGuard (ParStmt       {}) = panic "translateGuard ParStmt"
+translateGuard (TransStmt     {}) = panic "translateGuard TransStmt"
+translateGuard (RecStmt       {}) = panic "translateGuard RecStmt"
+
+translateLet :: HsLocalBinds Id -> UniqSM PatVec
+translateLet binds = return [] -- NOT CORRECT: A let cannot fail so in a way we
+  -- are fine with it but it can bind things which we do not bring in scope.
+  -- Hence, they are free while they shouldn't. More constraints would make it
+  -- more expressive but omitting some is always safe (Is it? Make sure it is)
+
+translateBind :: LPat Id -> LHsExpr Id -> UniqSM PatVec
+translateBind (L _ p) e = do
+  ps <- translatePat p
+  let expr = lhsExprToPmExpr e
+  return [GBindAbs ps expr]
+
+translateBoolGuard :: LHsExpr Id -> UniqSM PatVec
+translateBoolGuard e
   | Just _ <- isTrueLHsExpr e = return []
-  | otherwise = let e' = lhsExprToPmExpr e
-                    ps = [truePmPat]
-                in  return [GBindAbs ps e']
-translateGuard (LetStmt binds)
-  = undefined {- WHAT TO DO WITH THIS THEN? WE CARE OR NOT? -}
-translateGuard (BindStmt p e _ _)
-  = do pats <- translatePat (unLoc p)
-       let e' = lhsExprToPmExpr e
-       return [GBindAbs pats e']
-translateGuard (LastStmt  {}) = panic "translateGuard LastStmt"
-translateGuard (ParStmt   {}) = panic "translateGuard ParStmt"
-translateGuard (TransStmt {}) = panic "translateGuard TransStmt"
-translateGuard (RecStmt   {}) = panic "translateGuard RecStmt"
+    -- The formal thing to do would be to generate (True <- True)
+    -- but it is trivial to solve so instead we give back an empty
+    -- PatVec for efficiency
+  | otherwise = return [GBindAbs [truePmPat] (lhsExprToPmExpr e)]
 
 -- -----------------------------------------------------------------------
 -- | Transform source expressions (HsExpr Id) to PmExpr
