@@ -396,6 +396,72 @@ translateEqnInfo :: EquationInfo -> UniqSM PatVec
 translateEqnInfo (EqnInfo { eqn_pats = ps })
   = concat <$> translatePatVec ps
 
+dsSrcVector :: [Pat Id] -> [GuardStmt Id] -> DsM PatVec
+dsSrcVector pats guards = liftUs $ do
+  ps_vec <- concat <$> translatePatVec pats
+  gd_vec <- translateGuards guards
+  return (ps_vec ++ gd_vec)
+
+-- | Instead of [EquationInfo]
+--     eqn_pats :: [Pat Id]
+--     eqn_rhs  :: MatchResult
+-- Use the type:
+--   ([Pat Id], [GuardStmt Id])
+--
+-- It contains the same information about patters but also
+-- the Guard statements instead of the opaque to us MatchResult
+--
+-- It is also suitable for all possible forms: case expressions, let-bindings,
+-- lambda bindings, do-expressions, etc.
+
+-- This is not OK. we can have:
+--
+--  p1 .. pn | g1 -> ...
+--           | g2 -> ...
+--           ...
+--           | gm -> ...
+
+--   Which should be translated to this I think:
+--
+--  p1 .. pn | g1 -> ...
+--  p1 .. pn | g2 -> ...
+--         ...
+--  p1 .. pn | gm -> ...
+
+
+-- check2 :: [Type] -> [([Pat Id], [GuardStmt Id])] -> DsM PmResult
+-- check2 tys pats_guards
+--   | null pats_guards = return ([],[],[]) -- If we have an empty match, do not reason at all
+--   | otherwise = do
+--       usupply    <- getUniqueSupplyM
+--       (rs,is,us) <- check'2 pats_guards (initial_uncovered usupply tys)
+--       return (rs, is, valSetAbsToList us)
+-- 
+-- check'2 :: [([Pat Id], [GuardStmt Id])] -> ValSetAbs -> DsM ([EquationInfo], [EquationInfo], ValSetAbs)
+-- check'2 [] missing = 
+-- 
+-- 
+-- check' :: [EquationInfo] -> ValSetAbs -> DsM ([EquationInfo], [EquationInfo], ValSetAbs)
+-- check' [] missing = do
+--   missing' <- pruneValSetAbs missing
+--   return ([], [], missing')
+-- check' (eq:eqs) missing = do
+--   -- Translate and process current clause
+--   translated    <- liftUs (translateEqnInfo eq)
+--   (c,  d,  us ) <- patVectProc translated missing
+--   (rs, is, us') <- check' eqs us
+--   return $ case (c,d) of
+--     (True,  _)     -> (   rs,    is, us')
+--     (False, True)  -> (   rs, eq:is, us')
+--     (False, False) -> (eq:rs,    is, us')
+
+
+
+
+
+
+
+
 -- -----------------------------------------------------------------------
 -- | Transform source guards (GuardStmt Id) to PmPats (Pattern)
 
