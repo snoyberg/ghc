@@ -238,7 +238,7 @@ initial_uncovered usupply tys = foldr Cons Singleton val_abs_vec
 {-
 %************************************************************************
 %*                                                                      *
-\subsection{Transform source patterns to pattern abstractions}
+\subsection{Transform source syntax to *our* syntax}
 %*                                                                      *
 %************************************************************************
 -}
@@ -273,7 +273,6 @@ mkPmConPat con arg_tys ex_tvs dicts args
            , cabs_dicts   = dicts
            , cabs_args    = args }
 
-
 -- -----------------------------------------------------------------------
 -- | Transform a Pat Id into a list of (PmPat Id) -- Note [Translation to PmPat]
 
@@ -297,22 +296,22 @@ translatePat pat = case pat of
   CoPat wrapper p ty -> do
     ps      <- translatePat p
     (xp,xe) <- mkPmId2FormsSM ty {- IS THIS TYPE CORRECT OR IS IT THE OPPOSITE?? -}
-    let g = GBindAbs ps $ PmExprOther $ HsWrap wrapper (unLoc xe)
+    let g = GBindAbs ps $ hsExprToPmExpr $ HsWrap wrapper (unLoc xe)
     return [xp,g]
 
   -- (n + k)  ===>   x (True <- x >= k) (n <- x-k)
   NPlusKPat n k ge minus -> do
     (xp, xe) <- mkPmId2FormsSM $ idType (unLoc n)
     let ke = noLoc (HsOverLit k)         -- k as located expression
-        g1 = GBindAbs [truePmPat]        $ PmExprOther $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
-        g2 = GBindAbs [VarAbs (unLoc n)] $ PmExprOther $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
+        g1 = GBindAbs [truePmPat]        $ hsExprToPmExpr $ OpApp xe (noLoc ge)    no_fixity ke -- True <- (x >= k)
+        g2 = GBindAbs [VarAbs (unLoc n)] $ hsExprToPmExpr $ OpApp xe (noLoc minus) no_fixity ke -- n    <- (x -  k)
     return [xp, g1, g2]
 
   -- (fun -> pat)   ===>   x (pat <- fun x)
   ViewPat lexpr lpat arg_ty -> do
     (xp,xe) <- mkPmId2FormsSM arg_ty
     ps      <- translatePat (unLoc lpat) -- p translated recursively
-    let g  = GBindAbs ps $ PmExprOther $ HsApp lexpr xe -- p <- f x
+    let g  = GBindAbs ps $ hsExprToPmExpr $ HsApp lexpr xe -- p <- f x
     return [xp,g]
 
   ListPat ps ty Nothing -> do
@@ -322,7 +321,7 @@ translatePat pat = case pat of
     (xp, xe) <- mkPmId2FormsSM pat_ty
     ps       <- translatePatVec (map unLoc lpats) -- list as value abstraction
     let pats = foldr (mkListPmPat elem_ty) [nilPmPat elem_ty] ps
-        g  = GBindAbs pats $ PmExprOther $ HsApp (noLoc to_list) xe -- [...] <- toList x
+        g  = GBindAbs pats $ hsExprToPmExpr $ HsApp (noLoc to_list) xe -- [...] <- toList x
     return [xp,g]
 
   ConPatOut { pat_con = L _ (PatSynCon _) } ->
@@ -373,11 +372,32 @@ translatePat pat = case pat of
 translatePatVec :: [Pat Id] -> UniqSM [PatVec] -- Do not concatenate them (sometimes we need them separately)
 translatePatVec pats = mapM translatePat pats
 
+translateConPatVec :: DataCon -> HsConPatDetails Id -> UniqSM PatVec
+translateConPatVec _ (PrefixCon ps)   = concat <$> translatePatVec (map unLoc ps)
+translateConPatVec _ (InfixCon p1 p2) = concat <$> translatePatVec (map unLoc [p1,p2])
+translateConPatVec c (RecCon (HsRecFields fs _))
+  | null fs   = mapM mkPmVarSM $ dataConOrigArgTys c
+  | otherwise = concat <$> translatePatVec (map (unLoc . snd) all_pats)
+  where
+    -- TODO: The functions below are ugly and they do not care much about types too
+    field_pats = map (\lbl -> (lbl, noLoc (WildPat (dataConFieldType c lbl)))) (dataConFieldLabels c)
+    all_pats   = foldr (\(L _ (HsRecField id p _)) acc -> insertNm (getName (unLoc id)) p acc)
+                       field_pats fs
+
+    insertNm nm p [] = [(nm,p)]
+    insertNm nm p (x@(n,_):xs)
+      | nm == n    = (nm,p):xs
+      | otherwise  = x : insertNm nm p xs
+
 -- -----------------------------------------------------------------------
 -- Temporary function (drops the guard (MR at the moment))
+
 translateEqnInfo :: EquationInfo -> UniqSM PatVec
 translateEqnInfo (EqnInfo { eqn_pats = ps })
   = concat <$> translatePatVec ps
+
+-- -----------------------------------------------------------------------
+-- | Transform source guards (GuardStmt Id) to PmPats (Pattern)
 
 -- A. What to do with lets?
 -- B. write a function hsExprToPmExpr for better results? (it's a yes)
@@ -401,30 +421,86 @@ translateGuard (ParStmt   {}) = panic "translateGuard ParStmt"
 translateGuard (TransStmt {}) = panic "translateGuard TransStmt"
 translateGuard (RecStmt   {}) = panic "translateGuard RecStmt"
 
-hsExprToPmExpr :: HsExpr Id -> PmExpr
-hsExprToPmExpr = PmExprOther -- FOR NOW
+-- -----------------------------------------------------------------------
+-- | Transform source expressions (HsExpr Id) to PmExpr
 
+-- The best thing we can do
 lhsExprToPmExpr :: LHsExpr Id -> PmExpr
 lhsExprToPmExpr (L _ e) = hsExprToPmExpr e
 
--- -----------------------------------------------------------------------
+-- The best thing we can do
+hsExprToPmExpr :: HsExpr Id -> PmExpr
 
-translateConPatVec :: DataCon -> HsConPatDetails Id -> UniqSM PatVec
-translateConPatVec _ (PrefixCon ps)   = concat <$> translatePatVec (map unLoc ps)
-translateConPatVec _ (InfixCon p1 p2) = concat <$> translatePatVec (map unLoc [p1,p2])
-translateConPatVec c (RecCon (HsRecFields fs _))
-  | null fs   = mapM mkPmVarSM $ dataConOrigArgTys c
-  | otherwise = concat <$> translatePatVec (map (unLoc . snd) all_pats)
+hsExprToPmExpr (HsVar         x) = PmExprVar x
+hsExprToPmExpr (HsOverLit  olit) = PmExprOLit olit
+hsExprToPmExpr (HsLit       lit) = PmExprLit lit
+
+hsExprToPmExpr e@(NegApp (L _ neg) neg_e)
+  | PmExprOLit ol <- hsExprToPmExpr neg_e = PmExprNeg ol
+  | otherwise                             = PmExprOther e
+hsExprToPmExpr (HsPar   (L _ e)) = hsExprToPmExpr e
+
+hsExprToPmExpr e@(ExplicitTuple ps boxity)
+  | all tupArgPresent ps = PmExprCon tuple_con tuple_args
+  | otherwise            = PmExprOther e
   where
-    -- TODO: The functions below are ugly and they do not care much about types too
-    field_pats = map (\lbl -> (lbl, noLoc (WildPat (dataConFieldType c lbl)))) (dataConFieldLabels c)
-    all_pats   = foldr (\(L _ (HsRecField id p _)) acc -> insertNm (getName (unLoc id)) p acc)
-                       field_pats fs
+    tuple_con  = tupleCon (boxityNormalTupleSort boxity) (length ps)
+    tuple_args = [ lhsExprToPmExpr e | L _ (Present e) <- ps ]
 
-    insertNm nm p [] = [(nm,p)]
-    insertNm nm p (x@(n,_):xs)
-      | nm == n    = (nm,p):xs
-      | otherwise  = x : insertNm nm p xs
+hsExprToPmExpr e@(ExplicitList elem_ty mb_ol elems)
+  | Nothing <- mb_ol = foldr cons nil (map lhsExprToPmExpr elems)
+  | otherwise        = PmExprOther e {- overloaded list: No PmExprApp -}
+  where
+    cons x xs = PmExprCon consDataCon [x,xs]
+    nil       = PmExprCon nilDataCon  []
+
+hsExprToPmExpr (ExplicitPArr _elem_ty elems)
+  = PmExprCon (parrFakeCon (length elems)) (map lhsExprToPmExpr elems)
+
+hsExprToPmExpr e@(RecordCon     _ _ _) = PmExprOther e -- HAS TO BE HANDLED -- SIMILAR TO TRANSLATION OF RECORD PATTERNS
+                                                       -- hsExprToPmExpr (RecordCon (Located id) PostTcExpr (HsRecordBinds id)
+hsExprToPmExpr (HsTick            _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (HsBinTick       _ _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (HsTickPragma      _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (HsSCC             _ e) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+hsExprToPmExpr (HsCoreAnn         _ e) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+hsExprToPmExpr (ExprWithTySig   e _ _) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+hsExprToPmExpr (ExprWithTySigOut  e _) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+
+-- UNHANDLED CASES
+hsExprToPmExpr e@(HsLam             _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsLamCase       _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsApp           _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(OpApp       _ _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(SectionL        _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(SectionR        _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsCase          _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsIf        _ _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsMultiIf       _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsLet           _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsDo          _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsBracket         _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsRnBracketOut  _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsTcBracketOut  _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsSpliceE       _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsQuasiQuoteE     _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsWrap          _ _) = PmExprOther e -- Not handled -- Can we do sth better than this?
+hsExprToPmExpr e@(HsUnboundVar      _) = PmExprOther e -- Not handled -- Have no idea about what this thing is
+hsExprToPmExpr e@(HsProc          _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsStatic          _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(ArithSeq      _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(PArrSeq         _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(RecordUpd _ _ _ _ _) = PmExprOther e -- Not handled
+
+-- IMPOSSIBLE CASES
+hsExprToPmExpr e@(HsIPVar           _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(HsArrApp  _ _ _ _ _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(HsArrForm     _ _ _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@EWildPat              = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(EAsPat          _ _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(EViewPat        _ _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(ELazyPat          _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(HsType            _) = pprPanic "hsTomPmExpr:" (ppr e)
 
 {-
 %************************************************************************
