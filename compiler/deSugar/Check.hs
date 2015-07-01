@@ -207,12 +207,62 @@ data PmExpr = PmExprVar   Id
 %************************************************************************
 -}
 
+
+-- | Check a single pattern binding
+-- ----------------------------------------------------------------------------
+
+type PmResult2 a = ([a], [a], [([ValAbs],[PmConstraint])])
+
+-- Single pattern binding (let)
+checkSingle :: Type -> LPat Id -> DsM (PmResult2 (LPat Id))
+checkSingle ty p@(L _ pat) = do
+  vec <- liftUs (translatePat pat)
+  vsa <- initial_uncovered [ty]
+  (c,d,us) <- patVectProc vec vsa
+  let us' = valSetAbsToList us
+  return $ case (c,d) of
+    (True,  _)     -> ([],  [],  us')
+    (False, True)  -> ([],  [p], us')
+    (False, False) -> ([p], [],  us')
+
+-- | Check many matches
+-- ----------------------------------------------------------------------------
+
+checkMatches :: [Type] -> [LMatch Id (LHsExpr Id)] -> DsM (PmResult2 (LMatch Id (LHsExpr Id)))
+checkMatches tys matches
+  | null matches = return ([],[],[])
+  | otherwise    = do
+      missing <- initial_uncovered tys
+      -- matches <- liftUs (translateMatches matches) -- some shadowing here..
+      (rs,is,us) <- checkMatches' matches missing
+      return (rs, is, valSetAbsToList us) -- Turn them into a list so we can take as many as we want
+
+checkMatches' :: [LMatch Id (LHsExpr Id)] -> ValSetAbs -> DsM ( [LMatch Id (LHsExpr Id)] -- Redundant matches
+                                                              , [LMatch Id (LHsExpr Id)] -- Inaccessible rhs
+                                                              , ValSetAbs )              -- Left uncovered
+checkMatches' [] missing = do
+  missing' <- pruneValSetAbs missing
+  return ([], [], missing')
+
+checkMatches' (m:ms) missing = do
+  (vec, guards) <- liftUs (translateMatch m)
+  -- HERE WE NEED SOME KIND OF MAGIC, PROCESS THE GUARDS AND PLUG THEM IN (CPS STYLE)
+  (c,  d,  us ) <- patVectProc undefined {- translated -} missing
+  (rs, is, us') <- checkMatches' ms us
+  return $ case (c,d) of
+    (True,  _)     -> (  rs,   is, us')
+    (False, True)  -> (  rs, m:is, us')
+    (False, False) -> (m:rs,   is, us')
+
+-- | TO BE DELETED PROBABLY
+-- ----------------------------------------------------------------------------
+
 check :: [Type] -> [EquationInfo] -> DsM PmResult
 check tys eq_info
   | null eq_info = return ([],[],[]) -- If we have an empty match, do not reason at all
   | otherwise = do
-      usupply    <- getUniqueSupplyM
-      (rs,is,us) <- check' eq_info (initial_uncovered usupply tys)
+      missing    <- initial_uncovered tys
+      (rs,is,us) <- check' eq_info missing
       return (rs, is, valSetAbsToList us)
 
 check' :: [EquationInfo] -> ValSetAbs -> DsM ([EquationInfo], [EquationInfo], ValSetAbs)
@@ -229,11 +279,12 @@ check' (eq:eqs) missing = do
     (False, True)  -> (   rs, eq:is, us')
     (False, False) -> (eq:rs,    is, us')
 
-initial_uncovered :: UniqSupply -> [Type] -> ValSetAbs
-initial_uncovered usupply tys = foldr Cons Singleton val_abs_vec
-  where
-    uniqs       = listSplitUniqSupply usupply
-    val_abs_vec = zipWith mkPmVar uniqs tys
+initial_uncovered :: [Type] -> DsM ValSetAbs
+initial_uncovered tys = do
+  us <- getUniqueSupplyM
+  cs <- ((:[]) . TyConstraint . bagToList) <$> getDictsDs
+  let vsa = zipWith mkPmVar (listSplitUniqSupply us) tys
+  return $ mkConstraint cs (foldr Cons Singleton vsa)
 
 {-
 %************************************************************************
@@ -396,6 +447,21 @@ translateEqnInfo :: EquationInfo -> UniqSM PatVec
 translateEqnInfo (EqnInfo { eqn_pats = ps })
   = concat <$> translatePatVec ps
 
+translateMatch :: LMatch Id (LHsExpr Id) -> UniqSM (PatVec,[PatVec])
+translateMatch (L _ (Match lpats _ grhss)) = do
+  pats'   <- concat <$> translatePatVec pats
+  guards' <- mapM translateGuards guards
+  return (pats', guards')
+  where
+    extractGuards :: LGRHS Id (LHsExpr Id) -> [GuardStmt Id]
+    extractGuards (L _ (GRHS gs _)) = map unLoc gs
+
+    pats   = map unLoc lpats
+    guards = map extractGuards (grhssGRHSs grhss)
+
+translateMatches :: [LMatch Id (LHsExpr Id)] -> UniqSM [(PatVec,[PatVec])] -- every vector with all its guards
+translateMatches = mapM translateMatch -- :: [Located (Match Id (LHsExpr Id))]
+
 dsSrcVector :: [Pat Id] -> [GuardStmt Id] -> DsM PatVec
 dsSrcVector pats guards = liftUs $ do
   ps_vec <- concat <$> translatePatVec pats
@@ -467,6 +533,7 @@ dsSrcVector pats guards = liftUs $ do
 
 -- A. What to do with lets?
 -- B. write a function hsExprToPmExpr for better results? (it's a yes)
+
 translateGuards :: [GuardStmt Id] -> UniqSM PatVec
 translateGuards guards = concat <$> mapM translateGuard guards
 
@@ -596,9 +663,43 @@ patVectProc vec vsa = do
   usC <- getUniqueSupplyM
   usU <- getUniqueSupplyM
   usD <- getUniqueSupplyM
-  mb_c <- anySatValSetAbs (covered   usC vec vsa)
-  mb_d <- anySatValSetAbs (divergent usD vec vsa)
+  -- mb_c <- anySatValSetAbs (covered   usC vec vsa)
+  -- mb_d <- anySatValSetAbs (divergent usD vec vsa)
+
+  -- pprInTcRnIf (ptext (sLit "INPUT UNCOVERED SET:")   <+> ppr vsa)
+  -- pprInTcRnIf (ptext (sLit "VECTOR TO CHECK:") <+> ppr vec)
+
+  let css = (covered   usC vec vsa)
+  mb_c <- anySatValSetAbs css
+  -- pprInTcRnIf (ptext (sLit "COVERED SET:")   <+> ppr css)
+  -- pprInTcRnIf (ptext (sLit "SOLVER RESULT:") <+> ppr mb_c)
+
+  let dss = (divergent usD vec vsa)
+  mb_d <- anySatValSetAbs dss
+  -- pprInTcRnIf (ptext (sLit "DIVERGENT SET:")   <+> ppr dss)
+  -- pprInTcRnIf (ptext (sLit "SOLVER RESULT:") <+> ppr mb_d)
+
   return (mb_c, mb_d, uncovered usU vec vsa)
+
+
+-- -- covered, uncovered, eliminated
+process_guards :: UniqSupply -> [PatVec] -> (ValSetAbs, ValSetAbs, ValSetAbs)
+process_guards _us [] = (Singleton, Empty, Empty) -- No guard == Trivially True guard
+process_guards us  gs = go us Singleton gs
+  where
+
+    -- THINK ABOUT THE BASE CASES, THEY ARE WRONG
+    go _usupply missing []       = (Empty, missing, Empty)
+    go  usupply missing (gv:gvs) = (mkUnion cs css, uss, mkUnion ds dss)
+      where
+        (us1, us2, us3, us4) = splitUniqSupply4 usupply
+
+        cs = covered   us1 gv missing
+        us = uncovered us2 gv missing
+        ds = divergent us3 gv missing
+
+        (css, uss, dss) = go us4 us gvs
+
 
 --- ----------------------------------------------------------------------------
 data WhatToDo = WTD { wtd_empty    :: ValSetAbs              -- What to return at the end of the vector
@@ -834,6 +935,23 @@ divergent _usupply (VarAbs _  : _) Singleton  = panic "divergent: length mismatc
 divergent _usupply []               (Cons _ _) = panic "divergent: length mismatch: Cons"
 
 -- ----------------------------------------------------------------------------
+-- | Getting some more uniques
+
+-- Do not want an infinite list
+splitUniqSupply3 :: UniqSupply -> (UniqSupply, UniqSupply, UniqSupply)
+splitUniqSupply3 us = (us1, us2, us3)
+  where
+    (us1, us') = splitUniqSupply us
+    (us2, us3) = splitUniqSupply us'
+
+-- Do not want an infinite list
+splitUniqSupply4 :: UniqSupply -> (UniqSupply, UniqSupply, UniqSupply, UniqSupply)
+splitUniqSupply4 us = (us1, us2, us3, us4)
+  where
+    (us1, us2, us') = splitUniqSupply3 us
+    (us3, us4)      = splitUniqSupply us'
+
+-- ----------------------------------------------------------------------------
 -- | Basic utilities
 
 -- | Get the type out of a PmPat. For guard patterns (ps <- e) we use the type
@@ -865,8 +983,7 @@ mkOneConFull :: Id -> UniqSupply -> DataCon -> (ValAbs, [PmConstraint])
 mkOneConFull x usupply con = (con_abs, constraints)
   where
 
-    (usupply1, usupply') = splitUniqSupply usupply
-    (usupply2, usupply3) = splitUniqSupply usupply'
+    (usupply1, usupply2, usupply3) = splitUniqSupply3 usupply
 
     res_ty = idType x -- res_ty == TyConApp (dataConTyCon (cabs_con cabs)) (cabs_arg_tys cabs)
     (univ_tvs, ex_tvs, eq_spec, thetas, arg_tys, dc_res_ty) = dataConFullSig con
