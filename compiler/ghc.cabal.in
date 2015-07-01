@@ -259,6 +259,7 @@ Library
         CoreUtils
         MkCore
         PprCore
+        TmOracle
         Check
         Coverage
         Desugar
