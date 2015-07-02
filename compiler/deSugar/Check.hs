@@ -35,7 +35,6 @@ import TcSimplify( tcCheckSatisfiability )
 import TcType ( mkTcEqPred, toTcType, toTcTypeBag )
 import Bag
 import ErrUtils
-import TcMType (genInstSkolTyVarsX)
 import Data.List (find)
 import MonadUtils -- MonadIO
 import Var (EvVar)
@@ -425,72 +424,6 @@ translateMatch (L _ (Match lpats _ grhss)) = do
 
 translateMatches :: [LMatch Id (LHsExpr Id)] -> UniqSM [(PatVec,[PatVec])] -- every vector with all its guards
 translateMatches = mapM translateMatch -- :: [Located (Match Id (LHsExpr Id))]
-
-dsSrcVector :: [Pat Id] -> [GuardStmt Id] -> DsM PatVec
-dsSrcVector pats guards = liftUs $ do
-  ps_vec <- concat <$> translatePatVec pats
-  gd_vec <- translateGuards guards
-  return (ps_vec ++ gd_vec)
-
--- | Instead of [EquationInfo]
---     eqn_pats :: [Pat Id]
---     eqn_rhs  :: MatchResult
--- Use the type:
---   ([Pat Id], [GuardStmt Id])
---
--- It contains the same information about patters but also
--- the Guard statements instead of the opaque to us MatchResult
---
--- It is also suitable for all possible forms: case expressions, let-bindings,
--- lambda bindings, do-expressions, etc.
-
--- This is not OK. we can have:
---
---  p1 .. pn | g1 -> ...
---           | g2 -> ...
---           ...
---           | gm -> ...
-
---   Which should be translated to this I think:
---
---  p1 .. pn | g1 -> ...
---  p1 .. pn | g2 -> ...
---         ...
---  p1 .. pn | gm -> ...
-
-
--- check2 :: [Type] -> [([Pat Id], [GuardStmt Id])] -> DsM PmResult
--- check2 tys pats_guards
---   | null pats_guards = return ([],[],[]) -- If we have an empty match, do not reason at all
---   | otherwise = do
---       usupply    <- getUniqueSupplyM
---       (rs,is,us) <- check'2 pats_guards (initial_uncovered usupply tys)
---       return (rs, is, valSetAbsToList us)
--- 
--- check'2 :: [([Pat Id], [GuardStmt Id])] -> ValSetAbs -> DsM ([EquationInfo], [EquationInfo], ValSetAbs)
--- check'2 [] missing = 
--- 
--- 
--- check' :: [EquationInfo] -> ValSetAbs -> DsM ([EquationInfo], [EquationInfo], ValSetAbs)
--- check' [] missing = do
---   missing' <- pruneValSetAbs missing
---   return ([], [], missing')
--- check' (eq:eqs) missing = do
---   -- Translate and process current clause
---   translated    <- liftUs (translateEqnInfo eq)
---   (c,  d,  us ) <- patVectProc translated missing
---   (rs, is, us') <- check' eqs us
---   return $ case (c,d) of
---     (True,  _)     -> (   rs,    is, us')
---     (False, True)  -> (   rs, eq:is, us')
---     (False, False) -> (eq:rs,    is, us')
-
-
-
-
-
-
-
 
 -- -----------------------------------------------------------------------
 -- | Transform source guards (GuardStmt Id) to PmPats (Pattern)
@@ -1227,70 +1160,6 @@ tyOracle evs
        ; case res of
             Just sat -> return sat
             Nothing  -> pprPanic "tyOracle" (vcat $ pprErrMsgBagWithLoc errs) }
-
--- | Keep as a guide
--- checkTyPmPat :: PmPat Id -> Type -> PmM (Bag EvVar) -- check a type and a set of constraints
--- checkTyPmPat (PmGuardPat  _) _ = panic "checkTyPmPat: PmGuardPat"
--- checkTyPmPat (PmVarPat {})   _ = return emptyBag
--- checkTyPmPat (PmLitPat {})   _ = return emptyBag
--- checkTyPmPat (PmLitCon {})   _ = return emptyBag
--- checkTyPmPat (PmConPat con args) res_ty = do
---   let (univ_tvs, ex_tvs, eq_spec, thetas, arg_tys, dc_res_ty) = dataConFullSig con
---       data_tc = dataConTyCon con   -- The representation TyCon
---       mb_tc_args = case splitTyConApp_maybe res_ty of
---                      Nothing -> Nothing
---                      Just (res_tc, res_tc_tys)
---                        | Just (fam_tc, fam_args, _) <- tyConFamInstSig_maybe data_tc
---                        , let fam_tc_tvs = tyConTyVars fam_tc
---                        -> ASSERT( res_tc == fam_tc )
---                           case tcMatchTys (mkVarSet fam_tc_tvs) fam_args res_tc_tys of
---                             Just fam_subst -> Just (map (substTyVar fam_subst) fam_tc_tvs)
---                             Nothing        -> Nothing
---                        | otherwise
---                        -> ASSERT( res_tc == data_tc ) Just res_tc_tys
--- 
---   loc <- getSrcSpanDs
---   (subst, res_eq) <- case mb_tc_args of
---              Nothing  -> -- The context type doesn't have a type constructor at the head.
---                          -- so generate an equality.  But this doesn't really work if there
---                          -- are kind variables involved
---                          do (subst, _) <- genInstSkolTyVars loc univ_tvs
---                             res_eq <- newEqPmM (substTy subst dc_res_ty) res_ty
---                             return (subst, unitBag res_eq)
---              Just tys -> return (zipTopTvSubst univ_tvs tys, emptyBag)
--- 
---   (subst, _) <- genInstSkolTyVarsX loc subst ex_tvs
---   arg_cs     <- checkTyPmPatVec args (substTys subst arg_tys)
---   theta_cs   <- mapM (nameType "varcon") $
---                 substTheta subst (eqSpecPreds eq_spec ++ thetas)
--- 
---   return (listToBag theta_cs `unionBags` arg_cs `unionBags` res_eq)
--- 
--- checkTyPmPatVec :: [PmPat Id] -> [Type] -> PmM (Bag EvVar)
--- checkTyPmPatVec pats tys
---   = do { cs <- zipWithM checkTyPmPat pats tys
---        ; return (unionManyBags cs) }
-
-genInstSkolTyVars :: SrcSpan -> [TyVar] -> PmM (TvSubst, [TyVar])
--- Precondition: tyvars should be ordered (kind vars first)
--- see Note [Kind substitution when instantiating]
--- Get the location from the monad; this is a complete freshening operation
-genInstSkolTyVars loc tvs = genInstSkolTyVarsX loc emptyTvSubst tvs
-
--- | Keep as a guide
--- -- -----------------------------------------------------------------------
--- -- | Given a signature sig and an output vector, check whether the vector's type
--- -- can match the signature
--- wt :: [Type] -> OutVec -> PmM Bool
--- wt sig (_, vec)
---   | length sig == length vec = do
---       cs     <- checkTyPmPatVec vec sig
---       env_cs <- getDictsDs
---       tyOracle (cs `unionBags` env_cs)
---   | otherwise = pprPanic "wt: length mismatch:" (ppr sig $$ ppr vec)
-
-
-
 
 {-
 %************************************************************************
