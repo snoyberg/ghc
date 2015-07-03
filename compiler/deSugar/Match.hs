@@ -66,7 +66,7 @@ matchCheck :: DsMatchContext
 
 matchCheck ctx vars ty qs
   = do { dflags <- getDynFlags
-       ; dsPmWarn dflags ctx (map idType vars) qs
+       -- ; dsPmWarn dflags ctx (map idType vars) qs
        ; match vars ty qs }
 
 {-
@@ -694,7 +694,19 @@ matchWrapper ctxt (MG { mg_alts = matches
                       , mg_arg_tys = arg_tys
                       , mg_res_ty = rhs_ty
                       , mg_origin = origin })
-  = do  { eqns_info   <- mapM mk_eqn_info matches
+  = do  { -- showMeTheGuards matches --just to see
+          dflags <- getDynFlags
+        ; let flag_i = wopt Opt_WarnOverlappingPatterns      dflags
+        ; let flag_u = wopt Opt_WarnIncompletePatterns       dflags
+                    || wopt Opt_WarnIncompleteUniPatterns    dflags
+                    || wopt Opt_WarnIncompletePatternsRecUpd dflags
+        ; when (flag_i || flag_u) $ do
+            {- Checking -} (rs, is, us) <- checkMatches2 arg_tys matches
+            {- Checking -} pprInTcRnIf (ptext (sLit "rs:") <+> ppr rs)
+            {- Checking -} pprInTcRnIf (ptext (sLit "is:") <+> ppr is)
+            {- Checking -} pprInTcRnIf (pprUncovered us)
+
+        ; eqns_info   <- mapM mk_eqn_info matches
         ; new_vars    <- case matches of
                            []    -> mapM newSysLocalDs arg_tys
                            (m:_) -> selectMatchVars (map unLoc (hsLMatchPats m))
@@ -759,7 +771,20 @@ matchSinglePat :: CoreExpr -> HsMatchContext Name -> LPat Id
 -- Used for things like [ e | pat <- stuff ], where
 -- incomplete patterns are just fine
 matchSinglePat (Var var) ctx (L _ pat) ty match_result
-  = do { locn <- getSrcSpanDs
+  = do {
+         dflags <- getDynFlags
+       ; let flag_i = wopt Opt_WarnOverlappingPatterns      dflags
+       ; let flag_u = wopt Opt_WarnIncompletePatterns       dflags
+                   || wopt Opt_WarnIncompleteUniPatterns    dflags
+                   || wopt Opt_WarnIncompletePatternsRecUpd dflags
+       ; when (flag_i || flag_u) $ do
+           {- Checking -} (rs,is,us) <- checkSingle2 ty pat
+           {- Checking -} pprInTcRnIf (ptext (sLit "rs:") <+> ppr rs)
+           {- Checking -} pprInTcRnIf (ptext (sLit "is:") <+> ppr is)
+           {- Checking -} pprInTcRnIf (pprUncovered us)
+
+
+       ; locn <- getSrcSpanDs
        ; matchCheck (DsMatchContext ctx locn)
                     [var] ty
                     [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }] }
