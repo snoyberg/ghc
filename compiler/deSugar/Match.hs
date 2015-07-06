@@ -694,17 +694,11 @@ matchWrapper ctxt (MG { mg_alts = matches
                       , mg_arg_tys = arg_tys
                       , mg_res_ty = rhs_ty
                       , mg_origin = origin })
-  = do  { -- showMeTheGuards matches --just to see
-          dflags <- getDynFlags
-        ; let flag_i = wopt Opt_WarnOverlappingPatterns      dflags
-        ; let flag_u = wopt Opt_WarnIncompletePatterns       dflags
-                    || wopt Opt_WarnIncompleteUniPatterns    dflags
-                    || wopt Opt_WarnIncompletePatternsRecUpd dflags
-        ; when (flag_i || flag_u) $ do
-            {- Checking -} (rs, is, us) <- checkMatches2 arg_tys matches
-            {- Checking -} pprInTcRnIf (ptext (sLit "rs:") <+> ppr rs)
-            {- Checking -} pprInTcRnIf (ptext (sLit "is:") <+> ppr is)
-            {- Checking -} pprInTcRnIf (pprUncovered us)
+  = do  { dflags <- getDynFlags
+        ; locn   <- getSrcSpanDs
+
+        -- ; pmresult <- checkMatches2 arg_tys matches
+        ; dsPmWarn2 dflags (DsMatchContext ctxt locn) (checkMatches2 arg_tys matches) -- pmresult
 
         ; eqns_info   <- mapM mk_eqn_info matches
         ; new_vars    <- case matches of
@@ -771,20 +765,13 @@ matchSinglePat :: CoreExpr -> HsMatchContext Name -> LPat Id
 -- Used for things like [ e | pat <- stuff ], where
 -- incomplete patterns are just fine
 matchSinglePat (Var var) ctx (L _ pat) ty match_result
-  = do {
-         dflags <- getDynFlags
-       ; let flag_i = wopt Opt_WarnOverlappingPatterns      dflags
-       ; let flag_u = wopt Opt_WarnIncompletePatterns       dflags
-                   || wopt Opt_WarnIncompleteUniPatterns    dflags
-                   || wopt Opt_WarnIncompletePatternsRecUpd dflags
-       ; when (flag_i || flag_u) $ do
-           {- Checking -} (rs,is,us) <- checkSingle2 ty pat
-           {- Checking -} pprInTcRnIf (ptext (sLit "rs:") <+> ppr rs)
-           {- Checking -} pprInTcRnIf (ptext (sLit "is:") <+> ppr is)
-           {- Checking -} pprInTcRnIf (pprUncovered us)
+  = do { dflags <- getDynFlags
+       ; locn   <- getSrcSpanDs
 
+       -- Maybe I should remove this
+       -- ; (rs, is, us) <- checkSingle2 (idType var) pat
+       ; dsPmWarn2 dflags (DsMatchContext ctx locn) (checkSingle2 (idType var) pat) -- (map ((:[]) . noLoc) rs, map ((:[]) . noLoc) is, us)
 
-       ; locn <- getSrcSpanDs
        ; matchCheck (DsMatchContext ctx locn)
                     [var] ty
                     [EqnInfo { eqn_pats = [pat], eqn_rhs  = match_result }] }
@@ -1022,10 +1009,16 @@ Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.
 %************************************************************************
 -}
 
-dsPmWarn :: DynFlags -> DsMatchContext -> [Type] -> [EquationInfo] -> DsM ()
-dsPmWarn dflags ctx@(DsMatchContext kind loc) tys qs
+-- DsM (PmResult2 [LPat Id])
+-- type PmResult2 a = ([a], [a], [([ValAbs],[PmConstraint])])
+-- ([LPat Id], [LPat Id], [([ValAbs],[PmConstraint])]) -- redundant, inaccessible, missing
+
+
+dsPmWarn2 :: DynFlags -> DsMatchContext -> DsM (PmResult2 [LPat Id]) -> DsM ()
+-- ([[LPat Id]], [[LPat Id]], [([ValAbs],[PmConstraint])]) -> DsM ()
+dsPmWarn2 dflags ctx@(DsMatchContext kind loc) mPmResult -- (redundant, inaccessible, uncovered)
   = when (flag_i || flag_u) $ do
-      (redundant, inaccessible, uncovered) <- check tys qs
+      (redundant, inaccessible, uncovered) <- mPmResult
       let exists_r = flag_i && notNull redundant
           exists_i = flag_i && notNull inaccessible
           exists_u = flag_u && notNull uncovered
@@ -1079,8 +1072,8 @@ ppr_shadow_pats :: HsMatchContext Name -> [Pat Id] -> SDoc
 ppr_shadow_pats kind pats
   = sep [ppr_pats pats, matchSeparator kind, ptext (sLit "...")]
 
-ppr_eqn :: (SDoc -> SDoc) -> HsMatchContext Name -> EquationInfo -> SDoc
-ppr_eqn prefixF kind eqn = prefixF (ppr_shadow_pats kind (eqn_pats eqn))
+ppr_eqn :: (SDoc -> SDoc) -> HsMatchContext Name -> [LPat Id] -> SDoc
+ppr_eqn prefixF kind eqn = prefixF (ppr_shadow_pats kind (map unLoc eqn))
 
 -- This variable shows the maximum number of lines of output generated for warnings.
 -- It will limit the number of patterns/equations displayed to maximum_output.

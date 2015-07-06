@@ -8,7 +8,7 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds, GADTs, KindSignatures #-}
 
-module Check ( toTcTypeBag, pprUncovered, check, checkSingle2, checkMatches2, showMeTheGuards ) where
+module Check ( toTcTypeBag, pprUncovered, check, checkSingle2, checkMatches2, showMeTheGuards, ValAbs, PmConstraint, PmResult2 ) where
 
 #include "HsVersions.h"
 
@@ -1196,7 +1196,7 @@ pprUncovered vsa = vcat (map pprOne vsa)
 
 instance Outputable PmConstraint where
   ppr (TmConstraint x expr) = ppr x <+> equals <+> ppr expr
-  ppr (TyConstraint theta)  = empty -- pprSet $ map idType theta
+  ppr (TyConstraint theta)  = pprSet $ map idType theta
   ppr (BtConstraint x)      = braces (ppr x <+> ptext (sLit "~") <+> ptext (sLit "_|_"))
 
 instance Outputable (PmPat abs) where
@@ -1454,25 +1454,24 @@ patVectProc2 :: (PatVec, [PatVec]) -> ValSetAbs -> PmM (Bool, Bool, ValSetAbs) -
 patVectProc2 (vec,gvs) vsa = do
   us <- getUniqueSupplyM
   let (c_def, u_def, d_def) = process_guards us gvs -- default (the continuation)
+
   (usC, usU, usD) <- getUniqueSupplyM3
   mb_c <- anySatValSetAbs (covered2   usC c_def vec vsa)
   mb_d <- anySatValSetAbs (divergent2 usD d_def vec vsa)
   return (mb_c, mb_d, uncovered2 usU u_def vec vsa)
 
 -- Single pattern binding (let)
-checkSingle2 :: Type -> Pat Id -> DsM (PmResult2 (Pat Id))
+checkSingle2 :: Type -> Pat Id -> DsM (PmResult2 [LPat Id])
 checkSingle2 ty p = do
+  let lp = [noLoc p]
   vec <- liftUs (translatePat p)
   vsa <- initial_uncovered [ty]
   (c,d,us) <- patVectProc2 (vec,[]) vsa -- no guards
   let us' = valSetAbsToList us
   return $ case (c,d) of
-    (True,  _)     -> ([],  [],  us')
-    (False, True)  -> ([],  [p], us')
-    (False, False) -> ([p], [],  us')
-
-
--- lmatchToLPats :: LMatch id body -> [LPat id]
+    (True,  _)     -> ([],   [],   us')
+    (False, True)  -> ([],   [lp], us')
+    (False, False) -> ([lp], [],   us')
 
 checkMatches2 :: [Type] -> [LMatch Id (LHsExpr Id)] -> DsM (PmResult2 [LPat Id])
 checkMatches2 tys matches
@@ -1492,6 +1491,7 @@ checkMatches'2 [] missing = do
 
 checkMatches'2 (m:ms) missing = do
   patterns_n_guards <- liftUs (translateMatch m)
+  -- pprInTcRnIf (ptext (sLit "translated") <+> ppr patterns_n_guards)
   (c,  d,  us ) <- patVectProc2 patterns_n_guards missing -- process_vector_alternative patterns_n_guards missing
   (rs, is, us') <- checkMatches'2 ms us
   return $ case (c,d) of
