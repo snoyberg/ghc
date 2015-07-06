@@ -697,8 +697,8 @@ matchWrapper ctxt (MG { mg_alts = matches
   = do  { dflags <- getDynFlags
         ; locn   <- getSrcSpanDs
 
-        -- ; pmresult <- checkMatches2 arg_tys matches
-        ; dsPmWarn2 dflags (DsMatchContext ctxt locn) (checkMatches2 arg_tys matches) -- pmresult
+        -- pattern match check warnings
+        ; dsPmWarn dflags (DsMatchContext ctxt locn) (checkMatches2 arg_tys matches)
 
         ; eqns_info   <- mapM mk_eqn_info matches
         ; new_vars    <- case matches of
@@ -768,9 +768,8 @@ matchSinglePat (Var var) ctx (L _ pat) ty match_result
   = do { dflags <- getDynFlags
        ; locn   <- getSrcSpanDs
 
-       -- Maybe I should remove this
-       -- ; (rs, is, us) <- checkSingle2 (idType var) pat
-       ; dsPmWarn2 dflags (DsMatchContext ctx locn) (checkSingle2 (idType var) pat) -- (map ((:[]) . noLoc) rs, map ((:[]) . noLoc) is, us)
+       -- pattern match check warnings
+       ; dsPmWarn dflags (DsMatchContext ctx locn) (checkSingle2 (idType var) pat)
 
        ; matchCheck (DsMatchContext ctx locn)
                     [var] ty
@@ -1009,14 +1008,8 @@ Hence we don't regard 1 and 2, or (n+1) and (n+2), as part of the same group.
 %************************************************************************
 -}
 
--- DsM (PmResult2 [LPat Id])
--- type PmResult2 a = ([a], [a], [([ValAbs],[PmConstraint])])
--- ([LPat Id], [LPat Id], [([ValAbs],[PmConstraint])]) -- redundant, inaccessible, missing
-
-
-dsPmWarn2 :: DynFlags -> DsMatchContext -> DsM (PmResult2 [LPat Id]) -> DsM ()
--- ([[LPat Id]], [[LPat Id]], [([ValAbs],[PmConstraint])]) -> DsM ()
-dsPmWarn2 dflags ctx@(DsMatchContext kind loc) mPmResult -- (redundant, inaccessible, uncovered)
+dsPmWarn :: DynFlags -> DsMatchContext -> DsM PmResult -> DsM ()
+dsPmWarn dflags ctx@(DsMatchContext kind loc) mPmResult -- (redundant, inaccessible, uncovered)
   = when (flag_i || flag_u) $ do
       (redundant, inaccessible, uncovered) <- mPmResult
       let exists_r = flag_i && notNull redundant

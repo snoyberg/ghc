@@ -21,6 +21,8 @@ import MonadUtils
 import Data.List (foldl')
 import Control.Arrow (first)
 import DsGRHSs (isTrueLHsExpr)
+import SrcLoc
+import BasicTypes (boxityNormalTupleSort)
 
 import Control.Monad.Trans.State.Lazy
 import Control.Monad.Trans.Except
@@ -532,4 +534,89 @@ notForced x env = case getValuePmExpr env (PmExprVar x) of
 -- 
 -- solveComplexEqI :: ComplexEq -> PmVarEnv -> Maybe PmVarEnv
 -- solveComplexEqI (e1,e2) env = undefined {- Actual Work -}
+
+
+-- -----------------------------------------------------------------------
+-- | Transform source expressions (HsExpr Id) to PmExpr
+
+-- | We lose information but we have to abstract over it
+-- to get the results we want. Impossible to play with HsSyn
+
+-- The best thing we can do
+lhsExprToPmExpr :: LHsExpr Id -> PmExpr
+lhsExprToPmExpr (L _ e) = hsExprToPmExpr e
+
+-- The best thing we can do
+hsExprToPmExpr :: HsExpr Id -> PmExpr
+
+hsExprToPmExpr (HsVar         x) = PmExprVar x
+hsExprToPmExpr (HsOverLit  olit) = PmExprOLit olit
+hsExprToPmExpr (HsLit       lit) = PmExprLit lit
+
+hsExprToPmExpr e@(NegApp (L _ neg) neg_e)
+  | PmExprOLit ol <- hsExprToPmExpr neg_e = PmExprNeg ol
+  | otherwise                             = PmExprOther e
+hsExprToPmExpr (HsPar   (L _ e)) = hsExprToPmExpr e
+
+hsExprToPmExpr e@(ExplicitTuple ps boxity)
+  | all tupArgPresent ps = PmExprCon tuple_con tuple_args
+  | otherwise            = PmExprOther e
+  where
+    tuple_con  = tupleCon (boxityNormalTupleSort boxity) (length ps)
+    tuple_args = [ lhsExprToPmExpr e | L _ (Present e) <- ps ]
+
+hsExprToPmExpr e@(ExplicitList elem_ty mb_ol elems)
+  | Nothing <- mb_ol = foldr cons nil (map lhsExprToPmExpr elems)
+  | otherwise        = PmExprOther e {- overloaded list: No PmExprApp -}
+  where
+    cons x xs = PmExprCon consDataCon [x,xs]
+    nil       = PmExprCon nilDataCon  []
+
+hsExprToPmExpr (ExplicitPArr _elem_ty elems)
+  = PmExprCon (parrFakeCon (length elems)) (map lhsExprToPmExpr elems)
+
+hsExprToPmExpr e@(RecordCon     _ _ _) = PmExprOther e -- HAS TO BE HANDLED -- SIMILAR TO TRANSLATION OF RECORD PATTERNS
+                                                       -- hsExprToPmExpr (RecordCon (Located id) PostTcExpr (HsRecordBinds id)
+hsExprToPmExpr (HsTick            _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (HsBinTick       _ _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (HsTickPragma      _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (HsSCC             _ e) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+hsExprToPmExpr (HsCoreAnn         _ e) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+hsExprToPmExpr (ExprWithTySig   e _ _) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+hsExprToPmExpr (ExprWithTySigOut  e _) = lhsExprToPmExpr e -- Drop the additional info (what to do with it?)
+
+-- UNHANDLED CASES
+hsExprToPmExpr e@(HsLam             _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsLamCase       _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsApp           _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(OpApp       _ _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(SectionL        _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(SectionR        _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsCase          _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsIf        _ _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsMultiIf       _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsLet           _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsDo          _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsBracket         _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsRnBracketOut  _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsTcBracketOut  _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsSpliceE       _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsQuasiQuoteE     _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsWrap          _ _) = PmExprOther e -- Not handled -- Can we do sth better than this?
+hsExprToPmExpr e@(HsUnboundVar      _) = PmExprOther e -- Not handled -- Have no idea about what this thing is
+hsExprToPmExpr e@(HsProc          _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(HsStatic          _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(ArithSeq      _ _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(PArrSeq         _ _) = PmExprOther e -- Not handled
+hsExprToPmExpr e@(RecordUpd _ _ _ _ _) = PmExprOther e -- Not handled
+
+-- IMPOSSIBLE CASES
+hsExprToPmExpr e@(HsIPVar           _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(HsArrApp  _ _ _ _ _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(HsArrForm     _ _ _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@EWildPat              = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(EAsPat          _ _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(EViewPat        _ _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(ELazyPat          _) = pprPanic "hsTomPmExpr:" (ppr e)
+hsExprToPmExpr e@(HsType            _) = pprPanic "hsTomPmExpr:" (ppr e)
 
