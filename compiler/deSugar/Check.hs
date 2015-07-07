@@ -290,10 +290,14 @@ translatePat pat = case pat of
         guard = eqTrueExpr (PmExprEq (PmExprVar var) olit)
     return [VarAbs var, guard]
 
-  LitPat lit -> do
-    var <- mkPmIdSM (hsPatType pat)
-    let guard = eqTrueExpr $ PmExprEq (PmExprVar var) (PmExprLit lit)
-    return [VarAbs var, guard]
+  LitPat lit
+    | HsString src s <- lit -> -- If it is a real string convert it to a list of characters
+        foldr (mkListPmPat charTy) [nilPmPat charTy] <$>
+          translatePatVec (map (LitPat . HsChar src) (unpackFS s))
+    | otherwise -> do
+        var <- mkPmIdSM (hsPatType pat)
+        let guard = eqTrueExpr $ PmExprEq (PmExprVar var) (PmExprLit lit)
+        return [VarAbs var, guard]
 
   PArrPat ps ty -> do
     tidy_ps <-translatePatVec (map unLoc ps)
