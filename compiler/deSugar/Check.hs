@@ -1062,7 +1062,8 @@ patVectProc2 (vec,gvs) vsa = do
   (usC, usU, usD) <- getUniqueSupplyM3
   mb_c <- anySatValSetAbs (covered2   usC c_def vec vsa)
   mb_d <- anySatValSetAbs (divergent2 usD d_def vec vsa)
-  return (mb_c, mb_d, uncovered2 usU u_def vec vsa)
+  vsa' <- pruneValSetAbs  (uncovered2 usU u_def vec vsa)
+  return (mb_c, mb_d, vsa')
 
 -- Single pattern binding (let)
 checkSingle2 :: Type -> Pat Id -> DsM PmResult
