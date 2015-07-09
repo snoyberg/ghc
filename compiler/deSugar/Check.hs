@@ -325,23 +325,18 @@ translateConPatVec _univ_tys _ex_tvs _ (InfixCon p1 p2) = concat <$> translatePa
 translateConPatVec  univ_tys  ex_tvs c (RecCon (HsRecFields fs _))
   | null fs        = mkPmVarsSM arg_tys                            -- Nothing matched. Make up some fresh variables
   | null orig_lbls = ASSERT (null matched_lbls) mkPmVarsSM arg_tys -- If it is not a record but uses record syntax it can only be {}. So just like above
--- It is an optimisation anyway, we can avoid doing it..
---   | matched_lbls `subsetOf` orig_lbls = do -- Ordered: The easy case (no additional guards)
---       arg_pats <- zip orig_lbls <$> mkPmVarsSM arg_tys
---       {- WE'VE GOT WORK TO DO -}
---       undefined
--- subsetOf :: Eq a => [a] -> [a] -> Bool
--- subsetOf []     _  = True
--- subsetOf (_:_)  [] = False
--- subsetOf (x:xs) (y:ys)
---   | x == y         = subsetOf xs     ys
---   | otherwise      = subsetOf (x:xs) ys
+  -- It is an optimisation anyway, we can avoid doing it..
+  | matched_lbls `subsetOf` orig_lbls = ASSERT (length orig_lbls == length arg_tys) -- Ordered: The easy case (no additional guards)
+      let translateOne (lbl, ty) = case lookup lbl matched_pats of
+            Just p  -> translatePat p
+            Nothing -> mkPmVarsSM [ty]
+      in  concatMapM translateOne (zip orig_lbls arg_tys)
   | otherwise = do                         -- Not Ordered: We match against all patterns and add (strict) guards to match in the right order
       arg_var_pats <- mkPmVarsSM arg_tys -- the normal variable patterns -- no forcing yet
 
       translated_pats <- forM matched_pats $ \(x,pat) -> do
         pvec <- translatePat pat
-        return (idName x, pvec)
+        return (x, pvec)
 
       let zipped = zip orig_lbls [ x | VarAbs x <- arg_var_pats ] -- [(Name, Id)]
           guards = map (\(name,pvec) -> case lookup name zipped of
@@ -354,8 +349,15 @@ translateConPatVec  univ_tys  ex_tvs c (RecCon (HsRecFields fs _))
 
     -- Some label information
     orig_lbls    = dataConFieldLabels c
-    matched_lbls = [idName id | L _ (HsRecField (L _ id) _         _) <- fs]
-    matched_pats = [(id,pat)  | L _ (HsRecField (L _ id) (L _ pat) _) <- fs]
+    matched_lbls = [ idName id       | L _ (HsRecField (L _ id) _         _) <- fs]
+    matched_pats = [(idName id,pat)  | L _ (HsRecField (L _ id) (L _ pat) _) <- fs]
+
+    subsetOf :: Eq a => [a] -> [a] -> Bool
+    subsetOf []     _  = True
+    subsetOf (_:_)  [] = False
+    subsetOf (x:xs) (y:ys)
+      | x == y         = subsetOf xs     ys
+      | otherwise      = subsetOf (x:xs) ys
 
 translateMatch :: LMatch Id (LHsExpr Id) -> UniqSM (PatVec,[PatVec])
 translateMatch (L _ (Match lpats _ grhss)) = do
