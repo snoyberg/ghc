@@ -11,6 +11,8 @@ module TmOracle where -- you have to export less stuff
 
 #include "HsVersions.h"
 
+import Type
+import TcHsSyn
 import HsSyn
 import Id
 import DataCon
@@ -73,30 +75,59 @@ B. Solving Phase
 -- | Lifted version of (HsExpr Id)
 data PmExpr = PmExprVar   Id
             | PmExprCon   DataCon [PmExpr]
-            | PmExprLit   HsLit
-            | PmExprOLit  (HsOverLit Id)
-            | PmExprNeg   (HsOverLit Id) -- Syntactic negation
+            | PmExprLit   PmLit
             | PmExprEq    PmExpr PmExpr  -- Syntactic equality
             | PmExprOther (HsExpr Id)    -- NOTE [PmExprOther in PmExpr]
 
+data PmLit = PmLit  HsLit
+           | PmOLit Bool {- is it negated? -} (HsOverLit Id)
+
+instance Eq PmLit where
+  PmLit     l1 == PmLit l2     = l1 == l2
+  PmOLit b1 l1 == PmOLit b2 l2 = b1 == b2 && l1 == l2
+
+instance Outputable PmLit where
+  ppr (PmLit      l) = pmPprHsLit l
+  ppr (PmOLit neg l) = (if neg then char '-' else empty) <> ppr l
 
 instance Outputable PmExpr where
   ppr (PmExprVar x)    = ppr x
   ppr (PmExprCon c es) = sep (ppr c : map parenIfNeeded es)
-  ppr (PmExprLit  l)   = pmPprHsLit l -- don't use just ppr to avoid all the hashes
-  ppr (PmExprOLit l)   = ppr l
-  ppr (PmExprNeg  l)   = char '-' <> ppr l
+  ppr (PmExprLit  l)   = ppr l
   ppr (PmExprEq e1 e2) = parens (ppr e1 <+> equals <+> ppr e2)
   ppr (PmExprOther e)  = braces (ppr e) -- Just print it so that we know
 
 parenIfNeeded :: PmExpr -> SDoc
 parenIfNeeded e =
   case e of
-    PmExprNeg _   -> parens (ppr e)
+    PmExprLit l   -> (if isNegatedPmLit l then parens else id) (ppr e)
     PmExprCon _ es | null es   -> ppr e
                    | otherwise -> parens (ppr e)
     _other_expr   -> ppr e
 
+isNotPmExprOther :: PmExpr -> Bool
+isNotPmExprOther (PmExprOther _) = False
+isNotPmExprOther _expr           = True
+
+isPmExprOther :: PmExpr -> Bool
+isPmExprOther (PmExprOther _) = True
+isPmExprOther _expr           = False
+
+isPmLit :: PmExpr -> Bool
+isPmLit (PmExprLit (PmLit {})) = True
+isPmLit _other_expression      = False
+
+isPmOLit :: PmExpr -> Bool
+isPmOLit (PmExprLit (PmOLit {})) = True
+isPmOLit _other_expression       = False
+
+isNegatedPmLit :: PmLit -> Bool
+isNegatedPmLit (PmOLit b _) = b
+isNegatedPmLit _other_lit   = False
+
+pmLitType :: PmLit -> Type
+pmLitType (PmLit    lit) = hsLitType   lit
+pmLitType (PmOLit _ lit) = overLitType lit
 
 -- ----------------------------------------------------------------------------
 -- | Oracle Types
@@ -342,13 +373,6 @@ simplifyComplexEq eq =
       | l1 == l2  -> return (True, [])
       | otherwise -> mismatch eq
 
-    -- overloaded literals
-    (PmExprOLit l1, PmExprOLit l2)
-      | l1 == l2  -> return (True, [])
-      | otherwise -> mismatch eq
-    (PmExprOLit _, PmExprNeg _) -> mismatch eq
-    (PmExprNeg _, PmExprOLit _) -> mismatch eq
-
     -- constructors
     (PmExprCon c1 es1, PmExprCon c2 es2)
       | c1 == c2  -> simplifyComplexEqs (es1 `zip` es2)
@@ -358,17 +382,13 @@ simplifyComplexEq eq =
     (PmExprCon c es, PmExprEq e1 e2) -> handleDeepEq c es e1 e2
     (PmExprEq e1 e2, PmExprCon c es) -> handleDeepEq c es e1 e2
 
-    -- Overloaded error (Double check. Some of them may need to be panics)
-    (PmExprLit   _, PmExprOLit  _) -> overloaded_syntax
-    (PmExprLit   _, PmExprNeg   _) -> overloaded_syntax
-    (PmExprOLit  _, PmExprLit   _) -> overloaded_syntax
-    (PmExprNeg   _, PmExprLit   _) -> overloaded_syntax
-    (PmExprCon _ _, PmExprLit   _) -> overloaded_syntax
-    (PmExprCon _ _, PmExprNeg   _) -> overloaded_syntax
-    (PmExprCon _ _, PmExprOLit  _) -> overloaded_syntax
-    (PmExprLit   _, PmExprCon _ _) -> overloaded_syntax
-    (PmExprNeg   _, PmExprCon _ _) -> overloaded_syntax
-    (PmExprOLit  _, PmExprCon _ _) -> overloaded_syntax
+    -- Overloaded error
+    (PmExprCon _ _, PmExprLit l)
+      | PmOLit {} <- l -> overloaded_syntax
+      | otherwise      -> panic "simplifyComplexEq: constructor-literal"
+    (PmExprLit l, PmExprCon _ _)
+      | PmOLit {} <- l -> overloaded_syntax
+      | otherwise      -> panic "simplifyComplexEq: literal-constructor"
 
     _other_equality -> return (False, [eq]) -- can't simplify :(
 
@@ -393,11 +413,8 @@ certainlyEqual e1 e2 =
   case (e1, e2) of
 
     -- Simple cases
-    (PmExprVar   x, PmExprVar   y) -> eqVars x y  -- variables
-    (PmExprLit  l1, PmExprLit  l2) -> eqLit l1 l2 -- simple literals
-    (PmExprOLit l1, PmExprOLit l2) -> eqLit l1 l2 -- overloaded literals (same sign)
-    (PmExprOLit  _, PmExprNeg   _) -> falsePmExpr -- overloaded literals (different sign)
-    (PmExprNeg   _, PmExprOLit  _) -> falsePmExpr -- overloaded literals (different sign)
+    (PmExprVar  x, PmExprVar  y) -> eqVars x y  -- variables
+    (PmExprLit l1, PmExprLit l2) -> eqLit l1 l2 -- literals
 
     -- Constructor case (unfold)
     (PmExprCon c1 es1, PmExprCon c2 es2) -- constructors
@@ -550,12 +567,12 @@ lhsExprToPmExpr (L _ e) = hsExprToPmExpr e
 hsExprToPmExpr :: HsExpr Id -> PmExpr
 
 hsExprToPmExpr (HsVar         x) = PmExprVar x
-hsExprToPmExpr (HsOverLit  olit) = PmExprOLit olit
-hsExprToPmExpr (HsLit       lit) = PmExprLit lit
+hsExprToPmExpr (HsOverLit  olit) = PmExprLit (PmOLit False olit)
+hsExprToPmExpr (HsLit       lit) = PmExprLit (PmLit lit)
 
 hsExprToPmExpr e@(NegApp (L _ neg) neg_e)
-  | PmExprOLit ol <- hsExprToPmExpr neg_e = PmExprNeg ol
-  | otherwise                             = PmExprOther e
+  | PmExprLit (PmOLit False ol) <- hsExprToPmExpr neg_e = PmExprLit (PmOLit True ol)
+  | otherwise                                           = PmExprOther e
 hsExprToPmExpr (HsPar   (L _ e)) = hsExprToPmExpr e
 
 hsExprToPmExpr e@(ExplicitTuple ps boxity)

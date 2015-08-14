@@ -46,7 +46,7 @@ import Outputable
 import BasicTypes ( boxityNormalTupleSort, isGenerated )
 import FastString
 
-import Control.Monad( when )
+import Control.Monad( when, unless )
 import qualified Data.Map as Map
 
 {-
@@ -698,7 +698,8 @@ matchWrapper ctxt (MG { mg_alts = matches
         ; locn   <- getSrcSpanDs
 
         -- pattern match check warnings
-        ; dsPmWarn dflags (DsMatchContext ctxt locn) (checkMatches2 arg_tys matches)
+        ; unless (isGenerated origin) $
+            dsPmWarn dflags (DsMatchContext ctxt locn) (checkMatches2 arg_tys matches)
 
         ; eqns_info   <- mapM mk_eqn_info matches
         ; new_vars    <- case matches of
@@ -714,6 +715,7 @@ matchWrapper ctxt (MG { mg_alts = matches
            ; match_result <- addDictsDs dicts $ dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 
+    -- not sure if it is needed anymore (does `matchEquations' generate any other warning?)
     handleWarnings = if isGenerated origin
                      then discardWarningsDs
                      else id
